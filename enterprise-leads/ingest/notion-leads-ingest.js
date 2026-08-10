@@ -128,6 +128,7 @@ async function createLeadPage({ businessName, phone, siteUrl, hasSite, hasSsl, m
   });
   const data = await res.json();
   if (!res.ok) throw new Error(`Notion create page failed: ${JSON.stringify(data)}`);
+  return data.id; // needed so the outreach sequencer can later update this exact page
 }
 
 // Mirrors the lead into Supabase's `leads` table — this is what the
@@ -135,7 +136,7 @@ async function createLeadPage({ businessName, phone, siteUrl, hasSite, hasSsl, m
 // Notion's Review Status is a separate, human-facing concept; this row
 // is the machine-tracked outreach state. Skips silently if a row for
 // this business_name + site_url already exists.
-async function mirrorToSupabase({ businessName, category, phone, email, siteUrl, hasSsl, mobileOk }) {
+async function mirrorToSupabase({ businessName, category, phone, email, siteUrl, hasSsl, mobileOk, notionPageId }) {
   if (!supabase) return;
 
   const { data: existing } = await supabase
@@ -157,20 +158,35 @@ async function mirrorToSupabase({ businessName, category, phone, email, siteUrl,
     mobile_ok: mobileOk,
     status: 'new',
     sequence_step: 0,
+    notion_page_id: notionPageId,
   });
+}
+
+function shuffle(arr) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
 }
 
 async function run() {
   const config = JSON.parse(fs.readFileSync('config/places-queries.json', 'utf-8'));
+  const maxNew = config.max_new_leads_per_run ?? 5;
+  const queries = shuffle(config.queries); // rotate which categories win the daily cap
 
   let processed = 0;
   let flagged = 0;
   let written = 0;
 
-  for (const query of config.queries) {
+  for (const query of queries) {
+    if (written >= maxNew) break;
     const places = await searchPlaces(query, config.location_bias);
 
     for (const place of places) {
+      if (written >= maxNew) break;
+
       const businessName = place.displayName?.text || 'Unknown';
       const siteUrl = place.websiteUri || null;
       const phone = place.nationalPhoneNumber || null;
@@ -183,7 +199,7 @@ async function run() {
         flagged++;
         const exists = await alreadyExists(businessName);
         if (!exists) {
-          await createLeadPage({
+          const notionPageId = await createLeadPage({
             businessName,
             phone,
             siteUrl,
@@ -194,7 +210,7 @@ async function run() {
             category: query.category,
             placeId: place.id,
           });
-          await mirrorToSupabase({ businessName, category: query.category, phone, email, siteUrl, hasSsl, mobileOk });
+          await mirrorToSupabase({ businessName, category: query.category, phone, email, siteUrl, hasSsl, mobileOk, notionPageId });
           written++;
         }
       }
@@ -202,7 +218,7 @@ async function run() {
     }
   }
 
-  console.log(`notion-leads-ingest: processed ${processed}, flagged ${flagged}, wrote ${written} new leads to Notion.`);
+  console.log(`notion-leads-ingest: processed ${processed}, flagged ${flagged}, wrote ${written} new leads to Notion (cap: ${maxNew}).`);
 }
 
 run().catch((err) => {

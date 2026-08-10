@@ -1,6 +1,8 @@
 {
   "_comment": "Each query is a Google Places Text Search string + a bias location. Edit freely — this is the volume-of-choice knob for lead sourcing. Add a new line to widen the net; no code changes needed.",
   "location_bias": { "lat": 40.7982, "lng": -77.8599, "radius_meters": 12000 },
+  "max_new_leads_per_run": 5,
+  "_max_new_leads_note": "Caps total NEW leads written per run, across all categories combined — not 5 per category. Query order is shuffled each run so the same categories don't always win the daily 5.",
   "queries": [
     { "q": "restaurants in State College PA", "category": "restaurant" },
     { "q": "cafes and coffee shops in State College PA", "category": "cafe" },

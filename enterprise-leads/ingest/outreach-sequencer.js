@@ -24,6 +24,8 @@ const { createClient } = require('@supabase/supabase-js');
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const RESEND_KEY = process.env.RESEND_API_KEY;
+const NOTION_TOKEN = process.env.NOTION_TOKEN;
+const NOTION_VERSION = '2022-06-28';
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !RESEND_KEY) {
   console.log('outreach-sequencer: one or more required secrets are missing. Skipping run.');
@@ -71,6 +73,25 @@ function isDue(lead) {
   return daysSince >= touch.delay_days;
 }
 
+async function updateNotionOutreachStatus(lead, nextStep) {
+  if (!NOTION_TOKEN || !lead.notion_page_id) return; // no-ops if either is missing, never blocks the send
+  const res = await fetch(`https://api.notion.com/v1/pages/${lead.notion_page_id}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': NOTION_VERSION,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      properties: {
+        'Outreach Step': { number: nextStep },
+        'Last Outreach': { date: { start: new Date().toISOString().slice(0, 10) } },
+      },
+    }),
+  });
+  if (!res.ok) console.error(`Notion sync-back failed for ${lead.business_name}: ${await res.text()}`);
+}
+
 async function sendTouch(lead) {
   const nextStep = lead.sequence_step + 1;
   const touch = config.touches.find((t) => t.step === nextStep);
@@ -89,18 +110,30 @@ async function sendTouch(lead) {
       ${screenshotHtml}
     </div>`;
 
+  // Test mode redirects every send to your own inbox instead of the
+  // real business — lets you verify copy/formatting/screenshots
+  // without ever emailing a real lead.
+  const isTest = config.test_mode === true;
+  const toAddress = isTest ? config.test_recipient_email : lead.email;
+  const finalSubject = isTest ? `[TEST for ${lead.business_name}, step ${nextStep}] ${subject}` : subject;
+
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RESEND_KEY}` },
     body: JSON.stringify({
       from: config.from_email,
-      to: lead.email,
+      to: toAddress,
       reply_to: config.reply_to_email,
-      subject,
+      subject: finalSubject,
       html,
     }),
   });
   if (!res.ok) throw new Error(`Resend API ${res.status}: ${await res.text()}`);
+
+  // In test mode, don't advance real sequence state — the point is to
+  // preview the same lead's next touch again next run, not burn through
+  // the real cadence while testing.
+  if (isTest) return;
 
   const isLastTouch = nextStep === config.touches.length;
   await supabase
@@ -111,6 +144,8 @@ async function sendTouch(lead) {
       status: isLastTouch ? 'cold' : 'contacted',
     })
     .eq('id', lead.id);
+
+  await updateNotionOutreachStatus(lead, nextStep);
 }
 
 async function run() {
@@ -128,7 +163,9 @@ async function run() {
     sent++;
   }
 
-  console.log(`outreach-sequencer: ${leads.length} leads eligible, ${due.length} due this run, sent ${sent}.`);
+  console.log(
+    `outreach-sequencer: ${leads.length} leads eligible, ${due.length} due this run, sent ${sent}.${config.test_mode ? ' [TEST MODE — sent to test_recipient_email, no lead touched, no state advanced]' : ''}`
+  );
 }
 
 run().catch((err) => {
