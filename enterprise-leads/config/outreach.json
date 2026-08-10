@@ -1,0 +1,29 @@
+{
+  "_comment": "Controls the 3-touch cold outreach sequence. Edit freely, no code changes needed.",
+  "from_email": "onboarding@resend.dev",
+  "_from_email_note": "Switch to your own verified domain in Resend once set up — a real domain sends far better than the shared onboarding address for cold outreach specifically.",
+  "reply_to_email": "YOUR_EMAIL@example.com",
+  "max_sends_per_run": 25,
+  "_max_sends_note": "Caps how many emails go out in a single run, per the brief's 15-25/day guidance. The daily schedule + this cap together control total volume.",
+  "touches": [
+    {
+      "step": 1,
+      "delay_days": 0,
+      "subject": "Quick note about {business_name}'s website",
+      "body": "Hi there,\n\nI noticed {business_name}'s website {issue_line}. I put together a quick look at what it could look like fixed — attached below.\n\nI run a small website studio here in State College. If a refresh would help, happy to send over a couple options — no pressure either way.\n\nBest,\n{sender_name}"
+    },
+    {
+      "step": 2,
+      "delay_days": 4,
+      "subject": "Following up — {business_name}",
+      "body": "Hi again,\n\nJust following up on my note about {business_name}'s site. Totally understand if it's not a priority right now — if it ever is, I'm here.\n\nBest,\n{sender_name}"
+    },
+    {
+      "step": 3,
+      "delay_days": 10,
+      "subject": "Last note — {business_name}",
+      "body": "Hi one more time,\n\nI'll leave this here as my last check-in for now. If a website refresh becomes useful down the line, feel free to reach out any time.\n\nBest,\n{sender_name}"
+    }
+  ],
+  "sender_name": "YOUR_NAME"
+}
