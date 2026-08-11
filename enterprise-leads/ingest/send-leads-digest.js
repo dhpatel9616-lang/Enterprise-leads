@@ -7,14 +7,18 @@
  * No-ops safely if any are missing, or if to_email is still the
  * placeholder in config/digest.json.
  */
-const fs = require('fs');
+const { createClient } = require('@supabase/supabase-js');
+const { loadSetting } = require('./lib/settings');
 
 const RESEND_KEY = process.env.RESEND_API_KEY;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const NOTION_VERSION = '2022-06-28';
 
-const digestConfig = JSON.parse(fs.readFileSync('config/digest.json', 'utf-8'));
+const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY) : null;
+let digestConfig; // loaded from Supabase settings table at the start of run()
 
 async function fetchLeads() {
   const filter = digestConfig.only_todays_captures
@@ -70,12 +74,13 @@ function renderDigestHTML(pages) {
 }
 
 async function run() {
-  if (!RESEND_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID) {
+  if (!RESEND_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID || !supabase) {
     console.log('send-leads-digest: one or more required secrets are missing. Skipping run.');
     return;
   }
+  digestConfig = await loadSetting(supabase, 'digest');
   if (digestConfig.to_email.startsWith('YOUR_')) {
-    console.log('send-leads-digest: config/digest.json still has the placeholder to_email — skipping send.');
+    console.log('send-leads-digest: settings.digest still has the placeholder to_email — skipping send.');
     return;
   }
 

@@ -1,115 +1,139 @@
 # Enterprise Leads
 
 Sources local business leads (missing/broken websites = website-studio
-outreach targets) via Google Places, and writes them straight into
-Notion's **Raw Leads Inbox** — no separate database, Notion *is* the
-database for this pipeline. Runs weekday mornings only.
+outreach targets) via Google Places, writes them into Notion's **Raw
+Leads Inbox**, sends outreach from your **real Gmail account**, and
+detects replies to pause a lead's sequence automatically. Runs
+weekday mornings only.
 
 Deliberately separate from the "opportunity-automation" repo (The
 Board) — this is Sovereign/Enterprise business data, that's your
-personal opportunity feed. Different repo, different secrets, no
-shared code.
+personal opportunity feed. Different repo, different code. The one
+shared thing is the Supabase *project* (not tables).
 
 ## What runs, and when
 
-1. **`ingest-leads.yml`** — 8am ET, Mon–Fri. Runs `notion-leads-ingest.js`:
-   queries Google Places across every category in
-   `config/places-queries.json`, checks each business's site for
-   missing SSL / no mobile viewport / no site at all, and writes
-   anything flagged into Raw Leads Inbox with `Review Status:
-   Unreviewed`. Skips businesses already in Notion (matched by exact
-   Company name) so re-running never duplicates. Also mirrors the
-   same lead into a Supabase `leads` table (business_name, category,
-   phone, email, site_url, has_ssl, mobile_ok, status,
-   sequence_step) — Notion is your review/triage layer, Supabase is
-   what the outreach sequencer below actually tracks against.
-2. **`send-leads-digest.yml`** — 8:30am ET, Mon–Fri, 30 min after
-   ingest. Runs `send-leads-digest.js`: emails you everything
-   captured that morning.
-3. **`send-outreach.yml`** — 10am ET, Mon–Fri. Runs
-   `outreach-sequencer.js`: finds leads due for their next touch (day
-   0 / 4 / 10, see `config/outreach.json`), generates a live
-   screenshot of their current site, sends the email, and advances
-   their `sequence_step`. After the 3rd touch, status flips to
-   `cold` automatically.
+1. **`check-replies.yml`** — 9:45am ET, Mon–Fri. Checks every actively
+   sequenced lead's Gmail thread for a reply. If found: sets that
+   lead's status to `replied` (sequence stops automatically) and
+   appends a note in Notion's Raw Notes.
+2. **`ingest-leads.yml`** — 8am ET, Mon–Fri. Searches every
+   location × category combination in your settings, checks each
+   business's site for missing SSL / no mobile viewport / no site at
+   all, AND checks for social media links on the site. Classifies
+   each hot lead as needing `website`, `social`, or `both`, and
+   writes it to Notion + mirrors to Supabase with that classification.
+3. **`send-leads-digest.yml`** — 8:30am ET, Mon–Fri. Emails you
+   everything captured that morning.
+4. **`send-outreach.yml`** — 10am ET, Mon–Fri, *after* the reply check.
+   Sends the next due touch — **tailored to what that lead actually
+   needs**: a website-focused pitch (with before-screenshot) for
+   broken/missing sites, a social-focused pitch (no screenshot) for
+   fine sites with no social presence, or both. Sent via your real
+   Gmail account, threaded, synced to Notion.
 
-**Email gap, by design, not oversight:** Google Places doesn't return
-business emails. The ingest script scans each site's homepage HTML for
-a `mailto:` link as a free, best-effort catch — it'll get maybe half.
-Leads with no email found sit with `email: null` in Supabase and are
-automatically skipped by the outreach sequencer (never guesses an
-address). Check those manually in Notion's Raw Notes field
-periodically and fill in an email by hand if you find one, or drop the
-lead's status to `cold` if it's not worth chasing.
+**Full loop, as built:** find leads across every location/category →
+classify what each one needs → email from you with a tailored pitch →
+reply pauses the sequence automatically → non-replies get 6 weekly
+follow-ups → everything visible in Notion throughout.
 
-## Expanding the business categories
+**Email gap, still real:** Google Places doesn't return business
+emails. The ingest script scans each site's homepage for a `mailto:`
+link — catches maybe half. Leads with no email sit with `email: null`
+and are skipped by the sequencer. Check Notion's Raw Notes and fill
+one in by hand if you find it.
 
-Edit `config/places-queries.json` — add a line, no code changes.
-Already covers 20+ categories: restaurants, salons, contractors,
-legal, financial, medical, retail, and more, all geofenced to State
-College. Widen the radius or add a second city by editing
-`location_bias` or adding a second query block with its own bias.
+## Settings — edit via a real interface, not JSON files
 
-## Making the digest tweakable
+`dashboard/settings.html` — form fields for:
+- **Locations and categories, independently.** Add a location and
+  every existing business category gets searched there automatically.
+  Add a category and it's searched in every existing location. No
+  need to write out every combination by hand.
+- Max leads/day, outreach cadence, sender identity, digest behavior.
 
-`config/digest.json` controls the leads-captured email:
-- `only_todays_captures`: `true` (default) shows only what came in
-  that morning. Set `false` to show every still-Unreviewed lead
-  regardless of age — useful if you fall behind on reviewing.
-- Everything else (subject line, sender) is also just JSON — edit
-  and commit, no code touched.
+Saves write straight to Supabase; next scheduled run picks them up.
+See "Setup" below for how to open it correctly (edit as a text file
+first, not just double-clicked).
 
-## Making the outreach sequence tweakable
+**Tailored messaging, how it works:** the first email a lead gets is
+one of three variants (`settings.outreach.touch_sets.website /
+.social / .both`) depending on what the ingest script detected they
+need. The 5 follow-ups after that are shared copy
+(`settings.outreach.followups`) with an `{offer_phrase}` placeholder
+that still says the right thing ("your website" vs. "your social
+media presence" vs. "your website and social media") without needing
+15 separately hand-written follow-up emails. None of this email copy
+is in the settings form — describe what you want changed in chat and
+I'll update it directly in Supabase.
 
-`config/outreach.json` controls the cold-email cadence — all JSON,
-no code:
-- `touches`: the 3 emails themselves — subject, body (with
-  `{business_name}`, `{sender_name}`, `{issue_line}` placeholders),
-  and `delay_days` for spacing. Add a 4th touch, change the wording,
-  or shift timing by editing this array.
-- `max_sends_per_run`: caps volume per day (default 25, per the
-  brief's 15-25/day guidance).
-- Stopping a lead's sequence early (they replied, became a client, or
-  you just want to drop them) is a one-field edit in Supabase: change
-  that row's `status` to `replied`, `client`, or `cold`. The
-  sequencer only ever touches rows still at `new` or `contacted`.
+## Where things live
 
-**Not automated yet:** reply detection. There's no inbox-monitoring
-here — if a business replies, you need to manually flip their status
-in Supabase (or Notion) to stop further touches. Automating that would
-mean reading your inbox (Gmail connector), which is a deliberate next
-step, not something wired in by default.
+- **Notion Raw Leads Inbox** — human review/triage, plus live
+  `Outreach Step` / `Last Outreach` / reply notes.
+- **Supabase `leads` table** — machine-tracked state: status,
+  sequence_step, email, `notion_page_id`, `gmail_thread_id`,
+  `has_social`, `need_type`.
+- **Supabase `settings` table** — the config knobs.
+- **Your Gmail account** — actual sending + reply detection, via a
+  one-time OAuth setup (see below).
 
 ## Setup
 
 ### 1. Notion integration
-Already done — reusing the token from your other Notion automation
-work. Just confirm the integration has access to the Raw Leads Inbox
-database (Notion page → "..." → Connections).
+Already done — confirm it has access to Raw Leads Inbox (Notion page
+→ "..." → Connections).
 
-### 2. Secrets (repo Settings → Secrets and variables → Actions)
-- `GOOGLE_PLACES_API_KEY` — same key from the Board setup, or a new
-  restricted one.
-- `NOTION_TOKEN` — your existing integration token.
-- `NOTION_DATABASE_ID` — `d69c0026-0993-486c-afdc-d0de72c9ded0`
-  (Raw Leads Inbox's ID — already resolved for you).
-- `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` — your `opportunity-automation`
-  Supabase project's API URL and service_role key (same place you
-  grabbed these for the Board setup).
-- `RESEND_API_KEY` — same account as the Board's digest, or a
-  separate one if you want leads and opportunities on different
-  sending identities.
+### 2. Gmail OAuth (one-time)
+1. [console.cloud.google.com](https://console.cloud.google.com) →
+   enable the Gmail API on your project.
+2. "OAuth consent screen" → External → fill in app name + your email
+   → add yourself as a test user (fine to stay in "Testing" mode
+   forever for personal use).
+3. "Credentials" → "+ Create Credentials" → "OAuth client ID" → type
+   "Web application" → Authorized redirect URI:
+   `https://developers.google.com/oauthplayground` → Create. Save the
+   Client ID and Client Secret shown.
+4. Go to [developers.google.com/oauthplayground](https://developers.google.com/oauthplayground)
+   → gear icon → "Use your own OAuth credentials" → paste Client
+   ID/Secret.
+5. Search "Gmail API v1" in the left panel, check `gmail.send` and
+   `gmail.readonly` → "Authorize APIs" → sign in with the Gmail
+   account you want to send from → Allow.
+6. "Exchange authorization code for tokens" → copy the **Refresh
+   Token** shown. This is the long-lived credential — save it.
 
-### 3. Edit two config files
-- `config/digest.json` — replace `YOUR_EMAIL@example.com` with your
-  real address.
-- `config/outreach.json` — replace `YOUR_EMAIL@example.com` (reply-to)
-  and `YOUR_NAME` (sender sign-off) with your real values.
+### 3. Run the schema
+In Supabase SQL Editor (`opportunity-automation` project), run the
+entirety of `supabase/settings-schema.sql` — adds `gmail_thread_id` to
+`leads`, creates the `settings` table, seeds defaults.
 
-### 4. Push and test
-Push this folder as a new private repo. Test in this order: Actions →
-"Ingest leads to Notion" → Run workflow (check Raw Leads Inbox *and*
-Supabase's `leads` table for new rows), then "Send leads digest email",
-then "Send outreach touches" last — that one actually emails real
-businesses, so double-check `config/outreach.json` has real values
-before running it for real.
+### 4. Secrets (repo Settings → Secrets and variables → Actions)
+- `GOOGLE_PLACES_API_KEY`
+- `NOTION_TOKEN`, `NOTION_DATABASE_ID` = `d69c0026-0993-486c-afdc-d0de72c9ded0`
+- `SUPABASE_URL` / `SUPABASE_SERVICE_KEY`
+- `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` —
+  from step 2
+
+### 5. Fill in and open the settings page
+Right-click `dashboard/settings.html` → open with a **text editor**
+(not double-click, that opens it as a webpage first). Find and
+replace:
+```
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+```
+with your real values (Project Settings → API — the **anon/public**
+key, never service_role). Save the file, *then* double-click it to
+open in a browser. Fill in your real name, reply-to email, and
+test-mode recipient — the seeded defaults are placeholders that block
+sends until changed.
+
+### 6. Push and test
+Push this folder as a new private repo. Test in order: "Ingest leads
+to Notion", "Send leads digest email", then with `test_mode: true`
+(set via the settings page) run "Send outreach touches" a couple
+times to check real Gmail formatting/screenshots land correctly in
+your own inbox. Only flip `test_mode` off once that looks right —
+that's the one switch that makes it real. "Check for lead replies"
+can run anytime; it's read-only until it finds an actual reply.

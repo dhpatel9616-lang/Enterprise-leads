@@ -6,7 +6,8 @@
   "scripts": {
     "ingest": "node ingest/notion-leads-ingest.js",
     "digest": "node ingest/send-leads-digest.js",
-    "outreach": "node ingest/outreach-sequencer.js"
+    "outreach": "node ingest/outreach-sequencer.js",
+    "check-replies": "node ingest/check-replies.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0"
