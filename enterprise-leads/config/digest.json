@@ -1,9 +1,0 @@
-{
-  "_comment": "Controls the weekday leads-digest email. Edit freely, no code changes needed.",
-  "to_email": "YOUR_EMAIL@example.com",
-  "from_email": "onboarding@resend.dev",
-  "_from_email_note": "Resend's shared sender works immediately. Switch to your own verified domain later for a less spammy-looking sender.",
-  "subject_prefix": "Raw Leads —",
-  "only_todays_captures": true,
-  "_only_todays_captures_note": "true = digest shows only leads captured this run (recommended, avoids re-showing old Unreviewed leads every day). false = shows every still-Unreviewed lead regardless of when it was captured."
-}
