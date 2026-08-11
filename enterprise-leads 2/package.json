@@ -1,0 +1,18 @@
+{
+  "name": "enterprise-leads",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sources local business leads via Google Places and writes them into Notion's Raw Leads Inbox; sends a weekday-morning digest email of what came in.",
+  "scripts": {
+    "ingest": "node ingest/notion-leads-ingest.js",
+    "digest": "node ingest/send-leads-digest.js",
+    "outreach": "node ingest/outreach-sequencer.js",
+    "check-replies": "node ingest/check-replies.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
