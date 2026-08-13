@@ -118,6 +118,7 @@ async function sendTouch(lead) {
     sender_name: config.sender_name,
     issue_line: issueLine(lead),
     offer_phrase: offerPhrase,
+    context: lead.outreach_context ? `${lead.outreach_context} ` : '',
   };
   const subject = fillTemplate(touch.subject, vars);
   const bodyText = fillTemplate(touch.body, vars);
