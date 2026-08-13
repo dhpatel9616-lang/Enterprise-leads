@@ -5,6 +5,7 @@
   "description": "Sources local business leads via Google Places and writes them into Notion's Raw Leads Inbox; sends a weekday-morning digest email of what came in.",
   "scripts": {
     "ingest": "node ingest/notion-leads-ingest.js",
+    "ga-ingest": "node ingest/globalaggregate-leads-ingest.js",
     "digest": "node ingest/send-leads-digest.js",
     "outreach": "node ingest/outreach-sequencer.js",
     "check-replies": "node ingest/check-replies.js"
