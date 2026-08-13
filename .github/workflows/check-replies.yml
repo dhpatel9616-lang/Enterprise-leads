@@ -1,0 +1,27 @@
+name: Check For Lead Replies
+
+on:
+  schedule:
+    - cron: '45 13 * * 1-5' # 9:45am ET, Mon-Fri (UTC time — shifts by 1hr around DST)
+  workflow_dispatch: {}
+
+jobs:
+  check-replies:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "enterprise-leads 2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run check-replies
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
