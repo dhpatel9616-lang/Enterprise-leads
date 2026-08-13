@@ -43,6 +43,8 @@ const OFFER_PHRASES = {
   website: 'your website',
   social: 'your social media presence',
   both: 'your website and social media',
+  reciprocal_link: 'a reciprocal link',
+  research_contact: 'GlobalAggregate as a research tool',
 };
 
 function issueLine(lead) {
