@@ -1,0 +1,25 @@
+name: GlobalAggregate — Ingest Leads
+
+on:
+  schedule:
+    - cron: '15 12 * * 1-5' # 8:15am ET, Mon-Fri (UTC time — shifts by 1hr around DST)
+  workflow_dispatch: {}
+
+jobs:
+  ga-ingest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "enterprise-leads 2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run ga-ingest
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
