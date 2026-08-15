@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Enterprise Leads — Settings</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root { --bg:#11141b; --panel:#181c26; --text:#e9e7df; --muted:#8b93a7; --brass:#c9a227; --line:#2c3143; }
+  * { box-sizing: border-box; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; margin:0; padding:32px 20px 80px; }
+  .wrap { max-width:640px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:28px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:20px; }
+  .card h2 { font-size:14px; text-transform:uppercase; letter-spacing:0.04em; color:var(--brass); margin:0 0 16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin-bottom:6px; margin-top:14px; }
+  label:first-of-type { margin-top:0; }
+  input[type=text], input[type=number], input[type=email], textarea {
+    width:100%; background:#0d0f15; border:1px solid var(--line); border-radius:6px;
+    color:var(--text); padding:9px 11px; font-size:14px; font-family:inherit;
+  }
+  textarea { min-height:140px; font-family:monospace; font-size:12.5px; line-height:1.5; resize:vertical; }
+  .row { display:flex; gap:14px; }
+  .row > div { flex:1; }
+  .toggle-row { display:flex; align-items:center; justify-content:space-between; margin-top:14px; }
+  .toggle-row label { margin:0; }
+  input[type=checkbox] { width:18px; height:18px; }
+  .hint { font-size:11.5px; color:var(--muted); margin-top:5px; }
+  button { background:var(--brass); color:#11141b; border:none; border-radius:6px; padding:10px 18px; font-size:14px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:0.5; cursor:default; }
+  .status { font-size:13px; margin-top:10px; min-height:18px; }
+  .status.ok { color:#7fbf7f; }
+  .status.err { color:#e08080; }
+  .top-actions { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Enterprise Leads — Settings</h1>
+  <div class="sub">Edits write straight to Supabase — the next scheduled run picks them up automatically, no GitHub, no redeploy.</div>
+
+  <div class="card" id="card-sourcing">
+    <h2>Lead Sourcing</h2>
+    <label for="maxLeads">Max new leads per day</label>
+    <input type="number" id="maxLeads" min="1" max="50" />
+
+    <label for="locations">Locations to search (one per line, format: <code>Name | lat | lng | radius_meters</code>)</label>
+    <textarea id="locations" spellcheck="false" style="min-height:70px;"></textarea>
+    <div class="hint">Example: <code>Harrisburg, PA | 40.2732 | -76.8867 | 15000</code> — every category below gets searched in every location automatically.</div>
+
+    <label for="categories">Business categories to search (one per line, format: <code>search term | category label</code>)</label>
+    <textarea id="categories" spellcheck="false"></textarea>
+    <div class="hint">Example: <code>plumbers | contractor</code> — the location name gets appended automatically, don't include it here.</div>
+  </div>
+
+  <div class="card" id="card-cadence">
+    <h2>Outreach Cadence</h2>
+    <div class="row">
+      <div>
+        <label for="touchCount">Number of touches</label>
+        <input type="number" id="touchCount" min="1" max="10" />
+      </div>
+      <div>
+        <label for="delayDays">Days between touches (after the first)</label>
+        <input type="number" id="delayDays" min="1" max="30" />
+      </div>
+    </div>
+    <div class="hint">First touch is always tailored to what the lead needs (website/social/both) and sends immediately (day 0) — edit that copy via chat. These fields control the shared follow-up steps only.</div>
+
+    <label for="maxSends">Max emails sent per run</label>
+    <input type="number" id="maxSends" min="1" max="100" />
+
+    <div class="toggle-row">
+      <label for="testMode">Test mode (redirect every send to you, never touches a real lead)</label>
+      <input type="checkbox" id="testMode" />
+    </div>
+  </div>
+
+  <div class="card" id="card-identity">
+    <h2>Sender Identity</h2>
+    <label for="senderName">Your name (used in email sign-offs)</label>
+    <input type="text" id="senderName" />
+
+    <label for="replyTo">Reply-to email</label>
+    <input type="email" id="replyTo" />
+
+    <label for="testRecipient">Test-mode recipient email</label>
+    <input type="email" id="testRecipient" />
+  </div>
+
+  <div class="card" id="card-digest">
+    <h2>Leads Digest Email</h2>
+    <label for="digestTo">Send digest to</label>
+    <input type="email" id="digestTo" />
+
+    <div class="toggle-row">
+      <label for="todaysOnly">Only show today's captures (off = show every still-Unreviewed lead)</label>
+      <input type="checkbox" id="todaysOnly" />
+    </div>
+  </div>
+
+  <button id="saveBtn">Save changes</button>
+  <div class="status" id="status"></div>
+</div>
+
+<script>
+  // Fill in your Supabase project's URL and anon (public) key — anon key
+  // only, never the service_role key, since this runs in a browser.
+  const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+  const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+
+  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  let placesConfig, outreachConfig, digestConfig;
+
+  function categoriesToText(categories) {
+    return categories.map(c => `${c.search_term} | ${c.category}`).join('\n');
+  }
+  function textToCategories(text) {
+    return text.split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+      const [search_term, category] = line.split('|').map(s => s.trim());
+      return { search_term, category: category || 'general' };
+    });
+  }
+  function locationsToText(locations) {
+    return locations.map(l => `${l.name} | ${l.lat} | ${l.lng} | ${l.radius_meters}`).join('\n');
+  }
+  function textToLocations(text) {
+    return text.split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+      const [name, lat, lng, radius_meters] = line.split('|').map(s => s.trim());
+      return { name, lat: parseFloat(lat), lng: parseFloat(lng), radius_meters: parseInt(radius_meters, 10) };
+    });
+  }
+
+  async function load() {
+    const [{ data: places }, { data: outreach }, { data: digest }] = await Promise.all([
+      supabase.from('settings').select('value').eq('key', 'places_queries').single(),
+      supabase.from('settings').select('value').eq('key', 'outreach').single(),
+      supabase.from('settings').select('value').eq('key', 'digest').single(),
+    ]);
+    placesConfig = places.value;
+    outreachConfig = outreach.value;
+    digestConfig = digest.value;
+
+    document.getElementById('maxLeads').value = placesConfig.max_new_leads_per_run;
+    document.getElementById('locations').value = locationsToText(placesConfig.locations);
+    document.getElementById('categories').value = categoriesToText(placesConfig.categories);
+
+    document.getElementById('touchCount').value = 1 + outreachConfig.followups.length;
+    document.getElementById('delayDays').value = outreachConfig.followups[0]?.delay_days ?? 7;
+    document.getElementById('maxSends').value = outreachConfig.max_sends_per_run;
+    document.getElementById('testMode').checked = !!outreachConfig.test_mode;
+    document.getElementById('senderName').value = outreachConfig.sender_name;
+    document.getElementById('replyTo').value = outreachConfig.reply_to_email;
+    document.getElementById('testRecipient').value = outreachConfig.test_recipient_email;
+
+    document.getElementById('digestTo').value = digestConfig.to_email;
+    document.getElementById('todaysOnly').checked = !!digestConfig.only_todays_captures;
+  }
+
+  // Regenerates the shared followups array to match a new count/spacing
+  // while preserving existing copy where possible — touch_sets (the
+  // need-specific first email) are untouched by this, since count only
+  // affects the shared follow-up steps.
+  function regenerateFollowups(existingFollowups, newTotalCount, delayDays) {
+    const followupCount = Math.max(0, newTotalCount - 1);
+    const followups = [];
+    for (let i = 0; i < followupCount; i++) {
+      const existing = existingFollowups[i];
+      const template = existing ?? existingFollowups[existingFollowups.length - 1];
+      followups.push({ step: i + 2, delay_days: delayDays, subject: template.subject, body: template.body });
+    }
+    return followups;
+  }
+
+  async function save() {
+    const btn = document.getElementById('saveBtn');
+    const status = document.getElementById('status');
+    btn.disabled = true;
+    status.textContent = 'Saving…';
+    status.className = 'status';
+
+    try {
+      placesConfig.max_new_leads_per_run = parseInt(document.getElementById('maxLeads').value, 10);
+      placesConfig.locations = textToLocations(document.getElementById('locations').value);
+      placesConfig.categories = textToCategories(document.getElementById('categories').value);
+
+      const newCount = parseInt(document.getElementById('touchCount').value, 10);
+      const newDelay = parseInt(document.getElementById('delayDays').value, 10);
+      outreachConfig.followups = regenerateFollowups(outreachConfig.followups, newCount, newDelay);
+      outreachConfig.max_sends_per_run = parseInt(document.getElementById('maxSends').value, 10);
+      outreachConfig.test_mode = document.getElementById('testMode').checked;
+      outreachConfig.sender_name = document.getElementById('senderName').value;
+      outreachConfig.reply_to_email = document.getElementById('replyTo').value;
+      outreachConfig.test_recipient_email = document.getElementById('testRecipient').value;
+
+      digestConfig.to_email = document.getElementById('digestTo').value;
+      digestConfig.only_todays_captures = document.getElementById('todaysOnly').checked;
+
+      const results = await Promise.all([
+        supabase.from('settings').update({ value: placesConfig, updated_at: new Date().toISOString() }).eq('key', 'places_queries'),
+        supabase.from('settings').update({ value: outreachConfig, updated_at: new Date().toISOString() }).eq('key', 'outreach'),
+        supabase.from('settings').update({ value: digestConfig, updated_at: new Date().toISOString() }).eq('key', 'digest'),
+      ]);
+      const failed = results.find(r => r.error);
+      if (failed) throw failed.error;
+
+      status.textContent = 'Saved. Takes effect on the next scheduled run.';
+      status.className = 'status ok';
+    } catch (err) {
+      status.textContent = 'Save failed: ' + err.message;
+      status.className = 'status err';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  document.getElementById('saveBtn').addEventListener('click', save);
+  load().catch(err => {
+    document.getElementById('status').textContent = 'Load failed: ' + err.message;
+    document.getElementById('status').className = 'status err';
+  });
+</script>
+</body>
+</html>
