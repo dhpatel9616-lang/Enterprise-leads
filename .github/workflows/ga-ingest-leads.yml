@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: "enterprise-leads 2"
+        working-directory: "enterprise-leads"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
