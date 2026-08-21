@@ -27,16 +27,21 @@ function base64url(str) {
     .replace(/=+$/, '');
 }
 
-// Sends an email as the authenticated Gmail account. Pass threadId to
-// keep a follow-up grouped in the same Gmail conversation as earlier
-// touches. Returns { id, threadId } — save threadId to track this
-// lead's conversation for reply-detection.
-async function sendGmail({ to, subject, html, replyTo, threadId }) {
-  const accessToken = await getAccessToken();
+function buildRawMessage({ to, subject, html, replyTo }) {
   const headers = [`To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0', 'Content-Type: text/html; charset=UTF-8'];
   if (replyTo) headers.push(`Reply-To: ${replyTo}`);
+  return base64url(`${headers.join('\r\n')}\r\n\r\n${html}`);
+}
 
-  const raw = base64url(`${headers.join('\r\n')}\r\n\r\n${html}`);
+// Sends an email as the authenticated Gmail account immediately. Pass
+// threadId to keep a follow-up grouped in the same Gmail conversation as
+// earlier touches. Returns { id, threadId } — save threadId to track
+// this lead's conversation for reply-detection. Kept for check-replies.js
+// and any script that genuinely wants an immediate send (not used by
+// outreach-sequencer.js anymore — that creates drafts instead, see below).
+async function sendGmail({ to, subject, html, replyTo, threadId }) {
+  const accessToken = await getAccessToken();
+  const raw = buildRawMessage({ to, subject, html, replyTo });
   const body = { raw };
   if (threadId) body.threadId = threadId;
 
@@ -48,6 +53,45 @@ async function sendGmail({ to, subject, html, replyTo, threadId }) {
   const data = await res.json();
   if (!res.ok) throw new Error(`Gmail send failed: ${JSON.stringify(data)}`);
   return data;
+}
+
+// Creates a DRAFT instead of sending — the message sits in the Gmail
+// Drafts folder until a human reviews and sends it. Returns
+// { id, message: { id, threadId } }. Save the returned draft `id` so a
+// later run can check draftStillPending() to detect whether it was sent.
+async function createDraft({ to, subject, html, replyTo, threadId }) {
+  const accessToken = await getAccessToken();
+  const raw = buildRawMessage({ to, subject, html, replyTo });
+  const message = { raw };
+  if (threadId) message.threadId = threadId;
+
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Gmail draft creation failed: ${JSON.stringify(data)}`);
+  return data;
+}
+
+// Returns true if the draft still exists (still sitting unreviewed in the
+// Drafts folder). Returns false if it's gone — meaning it was either sent
+// (Gmail converts a sent draft into a normal sent message, and the draft
+// id stops resolving) or manually deleted. This library can't tell those
+// two apart; the caller treats "gone" as "sent" and documents that
+// assumption to the person.
+async function draftStillPending(draftId) {
+  const accessToken = await getAccessToken();
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (res.status === 404) return false;
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(`Gmail draft check failed: ${JSON.stringify(data)}`);
+  }
+  return true;
 }
 
 // The Gmail address the automation is authorized as — used by
@@ -74,4 +118,4 @@ async function getThreadMessages(threadId) {
   return data.messages || [];
 }
 
-module.exports = { sendGmail, getOwnEmailAddress, getThreadMessages };
+module.exports = { sendGmail, createDraft, draftStillPending, getOwnEmailAddress, getThreadMessages };
