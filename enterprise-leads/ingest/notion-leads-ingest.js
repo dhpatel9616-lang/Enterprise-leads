@@ -209,67 +209,80 @@ function buildQueries(config) {
   return combos;
 }
 
+// How many leads any single category is allowed to contribute in one run
+// — keeps the daily batch a genuine mix of business types instead of
+// letting one category (e.g. restaurants, if it happens to return the
+// most hits) fill the whole day's quota on its own.
+const CATEGORY_CAP_PER_RUN = 2;
+
+// Ranks candidates so the worst-off businesses (biggest real opportunity)
+// get written first within a category, rather than whatever order Google
+// Places happens to return. No website at all is the clearest gap; a
+// site with real problems (no SSL, not mobile-friendly) is next; missing
+// social alone is the mildest signal.
+function priorityScore({ hasSite, hasSsl, mobileOk, hasSocial, needType }) {
+  let score = 0;
+  if (!hasSite) score += 4;
+  else {
+    if (!hasSsl) score += 2;
+    if (!mobileOk) score += 2;
+  }
+  if (hasSocial === false) score += 2;
+  if (needType === 'both') score += 1;
+  return score;
+}
+
 async function run() {
   const config = await loadSetting(supabase, 'places_queries');
-  const maxNew = config.max_new_leads_per_run ?? 5;
+  const maxNew = config.max_new_leads_per_run ?? 10;
   const queries = shuffle(buildQueries(config)); // rotate which location×category combos win the daily cap
 
   let processed = 0;
   let flagged = 0;
   let written = 0;
+  const categoryCounts = {};
 
   for (const query of queries) {
     if (written >= maxNew) break;
+    if ((categoryCounts[query.category] || 0) >= CATEGORY_CAP_PER_RUN) continue; // this category's already had its share today — try the next for variety
+
     const places = await searchPlaces(query, query.locationBias);
+    const candidates = [];
 
     for (const place of places) {
-      if (written >= maxNew) break;
-
       const businessName = place.displayName?.text || 'Unknown';
       const siteUrl = place.websiteUri || null;
       const phone = place.nationalPhoneNumber || null;
-
       const { hasSite, hasSsl, mobileOk, email, hasSocial } = await checkSite(siteUrl);
       const needType = classifyNeed({ hasSite, hasSsl, mobileOk, hasSocial });
-
-      if (needType) {
-        flagged++;
-        const exists = await alreadyExists(businessName);
-        if (!exists) {
-          const notionPageId = await createLeadPage({
-            businessName,
-            phone,
-            siteUrl,
-            hasSite,
-            hasSsl,
-            mobileOk,
-            email,
-            hasSocial,
-            needType,
-            category: query.category,
-            locationName: query.locationName,
-            placeId: place.id,
-          });
-          await mirrorToSupabase({
-            businessName,
-            category: query.category,
-            phone,
-            email,
-            siteUrl,
-            hasSsl,
-            mobileOk,
-            hasSocial,
-            needType,
-            notionPageId,
-          });
-          written++;
-        }
-      }
       processed++;
+      if (!needType) continue;
+      flagged++;
+      candidates.push({
+        businessName, siteUrl, phone, hasSite, hasSsl, mobileOk, email, hasSocial, needType, placeId: place.id,
+        score: priorityScore({ hasSite, hasSsl, mobileOk, hasSocial, needType }),
+      });
+    }
+
+    candidates.sort((a, b) => b.score - a.score); // prime (worst web/social presence) candidates first
+
+    for (const c of candidates) {
+      if (written >= maxNew) break;
+      if ((categoryCounts[query.category] || 0) >= CATEGORY_CAP_PER_RUN) break;
+
+      const exists = await alreadyExists(c.businessName);
+      if (exists) continue;
+
+      const notionPageId = await createLeadPage({ ...c, category: query.category, locationName: query.locationName });
+      await mirrorToSupabase({ ...c, category: query.category, notionPageId });
+      written++;
+      categoryCounts[query.category] = (categoryCounts[query.category] || 0) + 1;
     }
   }
 
-  console.log(`notion-leads-ingest: processed ${processed}, flagged ${flagged}, wrote ${written} new leads to Notion (cap: ${maxNew}).`);
+  console.log(
+    `notion-leads-ingest: processed ${processed}, flagged ${flagged}, wrote ${written} new leads across ${Object.keys(categoryCounts).length} categories (cap: ${maxNew}, max ${CATEGORY_CAP_PER_RUN}/category).`
+  );
 }
 
 run().catch((err) => {
