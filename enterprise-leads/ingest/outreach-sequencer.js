@@ -40,10 +40,6 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !process.env.GMAIL_CLIENT_ID || !p
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 let config;
 
-function screenshotUrl(siteUrl) {
-  return `https://image.thum.io/get/width/900/crop/650/${siteUrl}`;
-}
-
 function fillTemplate(str, vars) {
   return str.replace(/\{(\w+)\}/g, (_, key) => vars[key] ?? '');
 }
@@ -182,18 +178,9 @@ async function draftTouch(lead) {
   const bodyText = fillTemplate(touch.body, vars);
   const threadedSubject = nextStep > 1 ? `Re: ${subject}` : subject;
 
-  // Only show the "before" screenshot when the pitch is actually about
-  // the website — showing a broken-site screenshot to a lead whose site
-  // is fine (pure social, or a GlobalAggregate lead) would undercut it.
-  const showScreenshot = lead.site_url && (lead.need_type === 'website' || lead.need_type === 'both');
-  const screenshotHtml = showScreenshot
-    ? `<div style="margin:20px 0;"><img src="${screenshotUrl(lead.site_url)}" alt="${lead.business_name}'s current site" style="max-width:100%; border:1px solid #333;" /></div>`
-    : '';
-
   const html = `
     <div style="font-family:sans-serif; font-size:15px; line-height:1.5; color:#1a1a1a;">
       ${bodyText.split('\n').map((line) => `<p style="margin:0 0 12px;">${line}</p>`).join('')}
-      ${screenshotHtml}
     </div>`;
 
   const isTest = config.test_mode === true;
