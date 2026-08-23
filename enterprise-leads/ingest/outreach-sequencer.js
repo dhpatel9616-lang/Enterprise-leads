@@ -49,11 +49,12 @@ function fillTemplate(str, vars) {
 }
 
 const OFFER_PHRASES = {
-  website: 'your website',
-  social: 'your social media presence',
-  both: 'your website and social media',
+  website: 'the tech and strategy support we offer',
+  social: 'the tech and strategy support we offer',
+  both: 'the tech and strategy support we offer',
   reciprocal_link: 'a reciprocal link',
   research_contact: 'GlobalAggregate as a research tool',
+  governance_audit: 'the AI Governance Readiness Audit',
 };
 
 function issueLine(lead) {
@@ -196,14 +197,22 @@ async function draftTouch(lead) {
     </div>`;
 
   const isTest = config.test_mode === true;
-  const toAddress = isTest ? config.test_recipient_email : lead.email;
+  // A lead whose own email already IS the test recipient is a deliberate
+  // synthetic test lead (see the one-off test-lead flow) — safe to track
+  // fully even while global test_mode is on, since it was never going to
+  // reach a real business either way. Only skip tracking for a REAL lead
+  // being redirected away from its actual inbox.
+  const isSyntheticTestLead = lead.email === config.test_recipient_email;
+  const skipTracking = isTest && !isSyntheticTestLead;
+
+  const toAddress = skipTracking ? config.test_recipient_email : lead.email;
   const finalSubject = isTest ? `[TEST for ${lead.business_name}, ${lead.need_type}, step ${nextStep}] ${threadedSubject}` : threadedSubject;
   const replyTo = config.reply_to_email && !config.reply_to_email.startsWith('YOUR_') ? config.reply_to_email : undefined;
   const threadId = nextStep > 1 ? lead.gmail_thread_id : undefined;
 
   const draft = await createDraft({ to: toAddress, subject: finalSubject, html, replyTo, threadId });
 
-  if (isTest) {
+  if (skipTracking) {
     console.log(`[TEST] Created a preview draft for ${lead.business_name} (step ${nextStep}) — not tracked, won't affect sequence state.`);
     return;
   }
