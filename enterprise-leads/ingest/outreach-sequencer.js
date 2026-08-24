@@ -1,19 +1,21 @@
 /**
- * Reads leads from the Supabase `leads` table and manages a two-phase
+ * Reads leads from the Supabase `leads` table and manages a hybrid
  * outreach cycle:
  *
- *   1. DRAFT — when a lead is due for its next touch, create a Gmail
- *      DRAFT (not a send) and sync the drafted subject/body into Notion's
- *      "Drafted Message" field. Nothing goes out yet.
- *   2. DETECT — on a later run, check whether that draft is still sitting
- *      in the Gmail Drafts folder. If it's gone, treat it as sent: advance
- *      the lead's sequence_step, update Notion, and the lead becomes
- *      eligible for its next touch after the usual delay.
+ *   - TOUCH 1 (first contact with a new lead) is always drafted, never
+ *     auto-sent. A Gmail DRAFT gets created and synced to Notion's
+ *     "Drafted Message" field, and nothing goes out until you review and
+ *     send it yourself. On a later run, the script checks whether that
+ *     draft is still sitting there (still pending) or gone (assumed
+ *     sent — Gmail can't tell "you sent it" apart from "you deleted it").
+ *   - TOUCHES 2-6 (follow-ups) auto-send once due, no draft step. The
+ *     idea: you've already reviewed and approved this lead once by
+ *     sending touch 1 yourself, so the follow-ups you already wrote are
+ *     trusted to go out on their own from there.
  *
- * Gmail can't distinguish "you sent it" from "you deleted it" — both just
- * make the draft disappear. This script assumes "gone = sent". If you
- * don't want to send a drafted touch, leave it alone rather than deleting
- * it; an untouched draft just pauses that lead harmlessly.
+ * If you don't want a drafted touch-1 to send, leave it alone rather
+ * than deleting it — an untouched draft just pauses that lead
+ * harmlessly, since nothing downstream advances until it's gone.
  *
  * Touch 1 differs by need_type (settings.outreach.touch_sets).
  * Touches 2+ are shared copy (settings.outreach.followups) with an
@@ -25,7 +27,7 @@
  */
 const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
-const { createDraft, draftStillPending } = require('./lib/gmail');
+const { createDraft, draftStillPending, sendGmail } = require('./lib/gmail');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -142,6 +144,42 @@ async function syncSentToNotion(lead, step) {
   await notionComment(lead.notion_page_id, `[Automation] Touch ${step} sent (detected via Gmail Drafts folder).`);
 }
 
+// Shared by both the draft path (touch 1) and the auto-send path
+// (touches 2+) — builds the subject/body/html for whatever touch is due.
+function buildMessage(lead, nextStep) {
+  const touch = touchForStep(lead, nextStep);
+  const offerPhrase = OFFER_PHRASES[lead.need_type] || OFFER_PHRASES.website;
+
+  const vars = {
+    business_name: lead.business_name,
+    sender_name: config.sender_name,
+    issue_line: issueLine(lead),
+    offer_phrase: offerPhrase,
+    context: lead.outreach_context ? `${lead.outreach_context} ` : '',
+  };
+  const subject = fillTemplate(touch.subject, vars);
+  const bodyText = fillTemplate(touch.body, vars);
+  const threadedSubject = nextStep > 1 ? `Re: ${subject}` : subject;
+  const html = `
+    <div style="font-family:sans-serif; font-size:15px; line-height:1.5; color:#1a1a1a;">
+      ${bodyText.split('\n').map((line) => `<p style="margin:0 0 12px;">${line}</p>`).join('')}
+    </div>`;
+
+  return { subject, bodyText, threadedSubject, html };
+}
+
+// A lead whose own email already IS the test recipient is a deliberate
+// synthetic test lead (see the one-off test-lead flow) — safe to track
+// fully even while global test_mode is on, since it was never going to
+// reach a real business either way. Only skip tracking for a REAL lead
+// being redirected away from its actual inbox.
+function trackingDecision(lead) {
+  const isTest = config.test_mode === true;
+  const isSyntheticTestLead = lead.email === config.test_recipient_email;
+  const skipTracking = isTest && !isSyntheticTestLead;
+  return { isTest, skipTracking, toAddress: skipTracking ? config.test_recipient_email : lead.email };
+}
+
 // A pending draft from a prior run: check whether it's still sitting
 // unreviewed, or gone (assumed sent — see file header).
 async function checkPendingDraft(lead) {
@@ -161,43 +199,16 @@ async function checkPendingDraft(lead) {
   return 'sent';
 }
 
-// Build and create a new draft for a lead's next due touch.
+// Touch 1 only: create a Gmail draft, don't send, wait for a human.
 async function draftTouch(lead) {
-  const nextStep = lead.sequence_step + 1;
-  const touch = touchForStep(lead, nextStep);
-  const offerPhrase = OFFER_PHRASES[lead.need_type] || OFFER_PHRASES.website;
+  const nextStep = 1;
+  const { subject, bodyText, threadedSubject, html } = buildMessage(lead, nextStep);
+  const { isTest, skipTracking, toAddress } = trackingDecision(lead);
 
-  const vars = {
-    business_name: lead.business_name,
-    sender_name: config.sender_name,
-    issue_line: issueLine(lead),
-    offer_phrase: offerPhrase,
-    context: lead.outreach_context ? `${lead.outreach_context} ` : '',
-  };
-  const subject = fillTemplate(touch.subject, vars);
-  const bodyText = fillTemplate(touch.body, vars);
-  const threadedSubject = nextStep > 1 ? `Re: ${subject}` : subject;
-
-  const html = `
-    <div style="font-family:sans-serif; font-size:15px; line-height:1.5; color:#1a1a1a;">
-      ${bodyText.split('\n').map((line) => `<p style="margin:0 0 12px;">${line}</p>`).join('')}
-    </div>`;
-
-  const isTest = config.test_mode === true;
-  // A lead whose own email already IS the test recipient is a deliberate
-  // synthetic test lead (see the one-off test-lead flow) — safe to track
-  // fully even while global test_mode is on, since it was never going to
-  // reach a real business either way. Only skip tracking for a REAL lead
-  // being redirected away from its actual inbox.
-  const isSyntheticTestLead = lead.email === config.test_recipient_email;
-  const skipTracking = isTest && !isSyntheticTestLead;
-
-  const toAddress = skipTracking ? config.test_recipient_email : lead.email;
   const finalSubject = isTest ? `[TEST for ${lead.business_name}, ${lead.need_type}, step ${nextStep}] ${threadedSubject}` : threadedSubject;
   const replyTo = config.reply_to_email && !config.reply_to_email.startsWith('YOUR_') ? config.reply_to_email : undefined;
-  const threadId = nextStep > 1 ? lead.gmail_thread_id : undefined;
 
-  const draft = await createDraft({ to: toAddress, subject: finalSubject, html, replyTo, threadId });
+  const draft = await createDraft({ to: toAddress, subject: finalSubject, html, replyTo });
 
   if (skipTracking) {
     console.log(`[TEST] Created a preview draft for ${lead.business_name} (step ${nextStep}) — not tracked, won't affect sequence state.`);
@@ -205,11 +216,35 @@ async function draftTouch(lead) {
   }
 
   const draftUpdates = { gmail_draft_id: draft.id };
-  if (nextStep === 1 && draft.message && draft.message.threadId) {
-    draftUpdates.gmail_thread_id = draft.message.threadId;
-  }
+  if (draft.message && draft.message.threadId) draftUpdates.gmail_thread_id = draft.message.threadId;
   await supabase.from('leads').update(draftUpdates).eq('id', lead.id);
   await syncDraftToNotion(lead, nextStep, subject, bodyText);
+}
+
+// Touches 2-6 only: send immediately, no draft step. You already
+// reviewed and approved this lead once by sending touch 1 yourself.
+async function sendFollowupTouch(lead) {
+  const nextStep = lead.sequence_step + 1;
+  const { threadedSubject, html } = buildMessage(lead, nextStep);
+  const { isTest, skipTracking, toAddress } = trackingDecision(lead);
+
+  const finalSubject = isTest ? `[TEST for ${lead.business_name}, ${lead.need_type}, step ${nextStep}] ${threadedSubject}` : threadedSubject;
+  const replyTo = config.reply_to_email && !config.reply_to_email.startsWith('YOUR_') ? config.reply_to_email : undefined;
+
+  await sendGmail({ to: toAddress, subject: finalSubject, html, replyTo, threadId: lead.gmail_thread_id });
+
+  if (skipTracking) {
+    console.log(`[TEST] Sent a preview follow-up for ${lead.business_name} (step ${nextStep}) — not tracked.`);
+    return;
+  }
+
+  const isLastTouch = nextStep === totalSteps();
+  await supabase.from('leads').update({
+    sequence_step: nextStep,
+    last_contacted: new Date().toISOString(),
+    status: isLastTouch ? 'cold' : 'contacted',
+  }).eq('id', lead.id);
+  await syncSentToNotion(lead, nextStep);
 }
 
 async function run() {
@@ -225,6 +260,7 @@ async function run() {
   let checked = 0;
   let detectedSent = 0;
   let newDrafts = 0;
+  let followupsSent = 0;
 
   for (const lead of leads) {
     if (lead.gmail_draft_id) {
@@ -233,14 +269,21 @@ async function run() {
       if (outcome === 'sent') detectedSent++;
       continue;
     }
-    if (newDrafts >= config.max_sends_per_run) continue;
+    if (newDrafts + followupsSent >= config.max_sends_per_run) continue;
     if (!isDue(lead)) continue;
-    await draftTouch(lead);
-    newDrafts++;
+
+    const nextStep = lead.sequence_step + 1;
+    if (nextStep === 1) {
+      await draftTouch(lead);
+      newDrafts++;
+    } else {
+      await sendFollowupTouch(lead);
+      followupsSent++;
+    }
   }
 
   console.log(
-    `outreach-sequencer: ${leads.length} eligible. ${checked} pending draft(s) checked (${detectedSent} detected sent). ${newDrafts} new draft(s) created this run.${config.test_mode ? ' [TEST MODE]' : ''}`
+    `outreach-sequencer: ${leads.length} eligible. ${checked} pending touch-1 draft(s) checked (${detectedSent} detected sent). ${newDrafts} new touch-1 draft(s) created, ${followupsSent} follow-up(s) auto-sent this run.${config.test_mode ? ' [TEST MODE]' : ''}`
   );
 }
 
