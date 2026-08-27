@@ -28,6 +28,24 @@ if (!PLACES_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID || !SUPABASE_URL || !SUP
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const NOTION_VERSION = '2022-06-28';
+
+const EMAIL_SHAPE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
+// Some sites HTML-entity-encode their contact email to defeat simple
+// regex scrapers (e.g. "info@x.com" becomes "&#105;&#110;&#102;...").
+// Decode before validating, and only accept the result if it actually
+// looks like an email — otherwise a stray "mailto:#" or similar junk
+// ends up stored as someone's "email address."
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&amp;/g, '&');
+}
+
+function isValidEmailShape(email) {
+  return EMAIL_SHAPE.test(email);
+}
 const NOTION_API = 'https://api.notion.com/v1';
 
 const SOCIAL_DOMAINS = ['facebook.com/', 'instagram.com/', 'twitter.com/', 'x.com/', 'tiktok.com/', 'linkedin.com/company'];
@@ -97,7 +115,10 @@ async function checkSite(url) {
     const html = await res.text();
     mobileOk = /<meta[^>]+name=["']viewport["']/i.test(html);
     const mailtoMatch = html.match(/mailto:([^"'?\s]+)/i);
-    if (mailtoMatch) email = mailtoMatch[1];
+    if (mailtoMatch) {
+      const candidate = decodeHtmlEntities(mailtoMatch[1]).trim().toLowerCase();
+      if (isValidEmailShape(candidate)) email = candidate;
+    }
     hasSocial = SOCIAL_DOMAINS.some((domain) => html.toLowerCase().includes(domain));
   } catch {
     mobileOk = false;
