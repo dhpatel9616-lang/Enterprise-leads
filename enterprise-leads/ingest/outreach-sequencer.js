@@ -19,7 +19,10 @@
  *
  * Touch 1 differs by need_type (settings.outreach.touch_sets).
  * Touches 2+ are shared copy (settings.outreach.followups) with an
- * {offer_phrase} placeholder that still reflects the right offer.
+ * {offer_phrase} placeholder that still reflects the right offer —
+ * EXCEPT for website/social/both leads from touch 3 onward, which pivot
+ * to the Automation Readiness Audit pitch (settings.outreach.automation_pivot)
+ * once they've gone quiet on the initial menu pitch. See touchForStep().
  *
  * Requires SUPABASE_URL, SUPABASE_SERVICE_KEY, GMAIL_CLIENT_ID,
  * GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN. No-ops safely if any are
@@ -72,6 +75,18 @@ function touchForStep(lead, step) {
   if (step === 1) {
     const set = config.touch_sets[lead.need_type] || config.touch_sets.website;
     return set[0];
+  }
+  // Automation Readiness Audit pivot: once a general small-business lead
+  // (website/social/both — not Legal AI, not GlobalAggregate) has gone
+  // quiet past the intro + one bump, later touches narrow the ask to a
+  // single low-commitment deliverable instead of repeating a generic
+  // "just checking in." Leaves config.followups untouched for everyone
+  // else, and falls back to it automatically if the pivot list is ever
+  // exhausted or unset.
+  const pivot = config.automation_pivot;
+  if (pivot && pivot.eligible_need_types.includes(lead.need_type) && step >= pivot.start_step) {
+    const pivotTouch = pivot.touches[step - pivot.start_step];
+    if (pivotTouch) return pivotTouch;
   }
   return config.followups[step - 2]; // followups[0] is step 2, etc.
 }
