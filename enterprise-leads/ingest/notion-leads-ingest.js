@@ -32,6 +32,28 @@ const NOTION_API = 'https://api.notion.com/v1';
 
 const SOCIAL_DOMAINS = ['facebook.com/', 'instagram.com/', 'twitter.com/', 'x.com/', 'tiktok.com/', 'linkedin.com/company'];
 
+// Some categories aren't being evaluated for "does this business need a
+// website/social fix" at all — the pitch is something else entirely, and
+// every business in that category is worth reaching regardless of how
+// good their existing site looks. 'legal' -> AI Governance Readiness
+// Audit is the first case. Add more (category -> need_type) here as new
+// non-website pitches launch, rather than writing new classifier logic.
+const CATEGORY_NEED_OVERRIDES = {
+  legal: 'governance_audit',
+};
+
+// Which `product` value a lead should be tagged with in Supabase, keyed
+// by category. Anything not listed here defaults to 'enterprise'.
+const CATEGORY_PRODUCT_MAP = {
+  legal: 'legal_ai',
+};
+
+// Suggested Notion category tag, keyed by category. Anything not listed
+// here defaults to 'Website Client'.
+const CATEGORY_SUGGESTED_TAG = {
+  legal: 'Legal AI Client',
+};
+
 async function searchPlaces(query, locationBias) {
   const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
     method: 'POST',
@@ -130,6 +152,8 @@ async function createLeadPage({ businessName, phone, siteUrl, hasSite, hasSsl, m
     `Google Place ID: ${placeId}`,
   ].filter(Boolean);
 
+  const suggestedTag = CATEGORY_SUGGESTED_TAG[category] || 'Website Client';
+
   const res = await fetch(`${NOTION_API}/pages`, {
     method: 'POST',
     headers: {
@@ -144,7 +168,7 @@ async function createLeadPage({ businessName, phone, siteUrl, hasSite, hasSsl, m
         Company: { rich_text: [{ text: { content: businessName } }] },
         'Raw Notes': { rich_text: [{ text: { content: notesLines.join('\n') } }] },
         'Review Status': { select: { name: 'Unreviewed' } },
-        'Suggested Category': { multi_select: [{ name: 'Website Client' }] },
+        'Suggested Category': { multi_select: [{ name: suggestedTag }] },
         'Source Detail': { rich_text: [{ text: { content: `Google Places — ${category} — ${locationName}` } }] },
         'Date Captured': { date: { start: new Date().toISOString().slice(0, 10) } },
       },
@@ -165,6 +189,8 @@ async function mirrorToSupabase({ businessName, category, phone, email, siteUrl,
 
   if (existing) return;
 
+  const product = CATEGORY_PRODUCT_MAP[category] || 'enterprise';
+
   await supabase.from('leads').insert({
     business_name: businessName,
     category,
@@ -175,6 +201,7 @@ async function mirrorToSupabase({ businessName, category, phone, email, siteUrl,
     mobile_ok: mobileOk,
     has_social: hasSocial,
     need_type: needType,
+    product,
     status: 'new',
     sequence_step: 0,
     notion_page_id: notionPageId,
@@ -254,7 +281,7 @@ async function run() {
       const siteUrl = place.websiteUri || null;
       const phone = place.nationalPhoneNumber || null;
       const { hasSite, hasSsl, mobileOk, email, hasSocial } = await checkSite(siteUrl);
-      const needType = classifyNeed({ hasSite, hasSsl, mobileOk, hasSocial });
+      const needType = CATEGORY_NEED_OVERRIDES[query.category] || classifyNeed({ hasSite, hasSsl, mobileOk, hasSocial });
       processed++;
       if (!needType) continue;
       flagged++;
