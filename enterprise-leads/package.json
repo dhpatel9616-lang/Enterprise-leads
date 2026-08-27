@@ -8,7 +8,8 @@
     "ga-ingest": "node ingest/globalaggregate-leads-ingest.js",
     "digest": "node ingest/send-leads-digest.js",
     "outreach": "node ingest/outreach-sequencer.js",
-    "check-replies": "node ingest/check-replies.js"
+    "check-replies": "node ingest/check-replies.js",
+    "enrich": "node ingest/enrich-emails.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0"
