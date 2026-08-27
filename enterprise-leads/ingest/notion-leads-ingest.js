@@ -44,7 +44,7 @@ function decodeHtmlEntities(str) {
 }
 
 function isValidEmailShape(email) {
-  return EMAIL_SHAPE.test(email);
+  return EMAIL_SHAPE.test(email) && email !== 'wadecapitallc@gmail.com';
 }
 const NOTION_API = 'https://api.notion.com/v1';
 
