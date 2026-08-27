@@ -43,6 +43,13 @@ const JUNK_PATTERNS = [
   /^postmaster@/i,
   /wordpress\.(com|org)$/i,
   /sentry-next\.wixpress\.com$/i,
+  // Our own outreach bot's User-Agent header includes
+  // "mailto:wadecapitallc@gmail.com" for abuse-contact purposes. If a
+  // site's response ever echoes back request headers (error pages,
+  // debug endpoints, some WAF block pages), a naive scrape can pick
+  // our own address up and mistake it for the business's. Never valid
+  // as a lead's email regardless of source.
+  /^wadecapitallc@gmail\.com$/i,
 ];
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
