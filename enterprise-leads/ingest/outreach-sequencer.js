@@ -277,26 +277,45 @@ async function run() {
   let newDrafts = 0;
   let followupsSent = 0;
 
-  for (const lead of leads) {
-    if (lead.gmail_draft_id) {
-      checked++;
-      const outcome = await checkPendingDraft(lead);
-      if (outcome === 'sent') detectedSent++;
-      continue;
-    }
-    if (newDrafts + followupsSent >= config.max_sends_per_run) continue;
-    if (!isDue(lead)) continue;
+  let skipped = 0;
 
-    const nextStep = lead.sequence_step + 1;
-    if (nextStep === 1) {
-      await draftTouch(lead);
-      newDrafts++;
-    } else {
-      await sendFollowupTouch(lead);
-      followupsSent++;
+  for (const lead of leads) {
+    try {
+      if (lead.gmail_draft_id) {
+        checked++;
+        const outcome = await checkPendingDraft(lead);
+        if (outcome === 'sent') detectedSent++;
+        continue;
+      }
+      if (newDrafts + followupsSent >= config.max_sends_per_run) continue;
+      if (!isDue(lead)) continue;
+
+      const nextStep = lead.sequence_step + 1;
+      if (nextStep === 1) {
+        await draftTouch(lead);
+        newDrafts++;
+      } else {
+        await sendFollowupTouch(lead);
+        followupsSent++;
+      }
+    } catch (err) {
+      // One bad record (e.g. a malformed scraped email) should never
+      // take down every other lead behind it in this run. Log it,
+      // clear the email so it falls out of eligibility and gets
+      // re-attempted by enrich-emails.mjs, and move on.
+      skipped++;
+      console.error(`outreach-sequencer: skipping "${lead.business_name}" (id ${lead.id}) after error: ${err.message}`);
+      await supabase.from('leads').update({ email: null }).eq('id', lead.id).catch(() => {});
+      await notionComment(
+        lead.notion_page_id,
+        `[Automation] Outreach failed for this lead (${err.message}). Email cleared so it can be re-checked by the enrichment step — if it fails again, the email likely needs to be fixed by hand.`
+      ).catch(() => {});
     }
   }
 
+  if (skipped > 0) {
+    console.log(`outreach-sequencer: ${skipped} lead(s) skipped due to errors this run — see log above for details.`);
+  }
   console.log(
     `outreach-sequencer: ${leads.length} eligible. ${checked} pending touch-1 draft(s) checked (${detectedSent} detected sent). ${newDrafts} new touch-1 draft(s) created, ${followupsSent} follow-up(s) auto-sent this run.${config.test_mode ? ' [TEST MODE]' : ''}`
   );
