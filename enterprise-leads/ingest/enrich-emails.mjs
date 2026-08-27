@@ -46,19 +46,38 @@ const JUNK_PATTERNS = [
 ];
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+const EMAIL_SHAPE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
+// Some sites HTML-entity-encode their contact email specifically to
+// defeat simple regex scrapers (e.g. "info@x.com" becomes
+// "&#105;&#110;&#102;&#111;&#64;..."). Browsers render this as plain
+// text so a human never notices — but a scraper that doesn't decode
+// entities first ends up storing the literal encoded gibberish as the
+// "email." Decode before we ever try to validate or match anything.
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&amp;/g, '&');
+}
+
+function isValidEmailShape(email) {
+  return EMAIL_SHAPE.test(email);
+}
 
 function isJunkEmail(email) {
   return JUNK_PATTERNS.some((pattern) => pattern.test(email));
 }
 
-function extractEmails(html) {
+function extractEmails(rawHtml) {
+  const html = decodeHtmlEntities(rawHtml);
   const found = new Set();
 
   // mailto: links are the highest-confidence signal
   const mailtoMatches = html.matchAll(/mailto:([^"'\s?]+)/gi);
   for (const m of mailtoMatches) {
     const email = m[1].trim().toLowerCase();
-    if (!isJunkEmail(email)) found.add(email);
+    if (isValidEmailShape(email) && !isJunkEmail(email)) found.add(email);
   }
 
   // Fallback: plain-text email pattern anywhere in the page
