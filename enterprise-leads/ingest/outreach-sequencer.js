@@ -305,11 +305,19 @@ async function run() {
       // re-attempted by enrich-emails.mjs, and move on.
       skipped++;
       console.error(`outreach-sequencer: skipping "${lead.business_name}" (id ${lead.id}) after error: ${err.message}`);
-      await supabase.from('leads').update({ email: null }).eq('id', lead.id).catch(() => {});
-      await notionComment(
-        lead.notion_page_id,
-        `[Automation] Outreach failed for this lead (${err.message}). Email cleared so it can be re-checked by the enrichment step — if it fails again, the email likely needs to be fixed by hand.`
-      ).catch(() => {});
+      try {
+        await supabase.from('leads').update({ email: null }).eq('id', lead.id);
+      } catch (cleanupErr) {
+        console.error(`outreach-sequencer: also failed to clear email for "${lead.business_name}": ${cleanupErr.message}`);
+      }
+      try {
+        await notionComment(
+          lead.notion_page_id,
+          `[Automation] Outreach failed for this lead (${err.message}). Email cleared so it can be re-checked by the enrichment step — if it fails again, the email likely needs to be fixed by hand.`
+        );
+      } catch {
+        // notionComment failing is non-critical; already logged via the outer skip.
+      }
     }
   }
 
