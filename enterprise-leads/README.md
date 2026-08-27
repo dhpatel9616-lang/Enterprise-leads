@@ -23,9 +23,19 @@ shared thing is the Supabase *project* (not tables).
    all, AND checks for social media links on the site. Classifies
    each hot lead as needing `website`, `social`, or `both`, and
    writes it to Notion + mirrors to Supabase with that classification.
-3. **`send-leads-digest.yml`** — 8:30am ET, Mon–Fri. Emails you
+   **Some categories skip that classification entirely** — see
+   `CATEGORY_NEED_OVERRIDES` in `notion-leads-ingest.js`. `legal` is
+   always tagged `governance_audit` / `product: legal_ai` regardless of
+   how good the firm's existing site looks, since the pitch for that
+   category isn't "you need a website."
+3. **`enrich-emails.yml`** — 8:10am ET, Mon–Fri, after ingest. Google
+   Places doesn't return emails, so this crawls each lead's site
+   (homepage + common contact/about subpaths) looking for one. Leads
+   still without an email after this just sit `email: null` and are
+   skipped by the sequencer until one's added by hand.
+4. **`send-leads-digest.yml`** — 8:30am ET, Mon–Fri. Emails you
    everything captured that morning.
-4. **`send-outreach.yml`** — 10am ET, Mon–Fri, *after* the reply check.
+5. **`send-outreach.yml`** — 10am ET, Mon–Fri, *after* the reply check.
    Sends the next due touch — **tailored to what that lead actually
    needs**: a website-focused pitch (with before-screenshot) for
    broken/missing sites, a social-focused pitch (no screenshot) for
@@ -37,11 +47,13 @@ classify what each one needs → email from you with a tailored pitch →
 reply pauses the sequence automatically → non-replies get 6 weekly
 follow-ups → everything visible in Notion throughout.
 
-**Email gap, still real:** Google Places doesn't return business
-emails. The ingest script scans each site's homepage for a `mailto:`
-link — catches maybe half. Leads with no email sit with `email: null`
-and are skipped by the sequencer. Check Notion's Raw Notes and fill
-one in by hand if you find it.
+**Email gap, mostly closed:** Google Places doesn't return business
+emails, so the ingest script's own `mailto:` scan only catches maybe
+half. `enrich-emails.yml` runs daily after ingest and crawls each
+site's homepage plus common contact/about subpaths for a real address,
+closing most of the rest. Whatever's left after that genuinely has no
+findable email — check Notion's Raw Notes and fill one in by hand if
+you spot one.
 
 ## Settings — edit via a real interface, not JSON files
 
