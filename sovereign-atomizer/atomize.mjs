@@ -1,0 +1,34 @@
+name: Sovereign Atomizer
+
+on:
+  schedule:
+    # 8:00 AM Eastern (12:00 UTC during EST / 12:00 UTC in winter — GitHub cron is UTC).
+    # Runs once a day; harmless if there's no new issue, it just logs and exits.
+    - cron: "0 12 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  atomize:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sovereign-atomizer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run atomizer
+        run: node atomize.mjs
+        env:
+          SUBSTACK_FEED_URL: "https://sovereignnewsletter.substack.com/feed"
+          NOTION_DATABASE_ID: ${{ vars.SOVEREIGN_NOTION_DATABASE_ID }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
