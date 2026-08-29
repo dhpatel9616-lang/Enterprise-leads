@@ -14,7 +14,7 @@ const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID; // Sovereign Content 
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const SETTINGS_KEY = "sovereign_atomizer_last_seen";
 
 const NOTION_VERSION = "2022-06-28";
@@ -29,9 +29,9 @@ requireEnv("NOTION_DATABASE_ID", NOTION_DATABASE_ID);
 requireEnv("NOTION_API_KEY", NOTION_API_KEY);
 requireEnv("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY);
 requireEnv("SUPABASE_URL", SUPABASE_URL);
-requireEnv("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_SERVICE_ROLE_KEY);
+requireEnv("SUPABASE_SERVICE_KEY", SUPABASE_SERVICE_KEY);
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 async function getProcessedGuids() {
   const { data, error } = await supabase
