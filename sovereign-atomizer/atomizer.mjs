@@ -5,11 +5,11 @@
 //
 // Nothing gets posted automatically — this only creates drafts for review.
 
-import Parser from "rss-parser";
 import { createClient } from "@supabase/supabase-js";
 
 // ---- Config (env vars set as GitHub Actions secrets/variables) ----
 const FEED_URL = process.env.SUBSTACK_FEED_URL || "https://sovereignnewsletter.substack.com/feed";
+const RSS2JSON_URL = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(FEED_URL)}`;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID; // Sovereign Content Calendar database id
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -127,23 +127,18 @@ async function createNotionDraftPage({ title, link, socialCopy }) {
 }
 
 async function main() {
-  const parser = new Parser();
-
-  const feedResponse = await fetch(FEED_URL, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      Accept: "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
+  const feedResponse = await fetch(RSS2JSON_URL);
 
   if (!feedResponse.ok) {
-    throw new Error(`Failed to fetch Substack feed: ${feedResponse.status} ${feedResponse.statusText}`);
+    throw new Error(`Failed to fetch Substack feed via rss2json: ${feedResponse.status} ${feedResponse.statusText}`);
   }
 
-  const feedXml = await feedResponse.text();
-  const feed = await parser.parseString(feedXml);
+  const feedData = await feedResponse.json();
+  if (feedData.status !== "ok") {
+    throw new Error(`rss2json returned an error: ${JSON.stringify(feedData)}`);
+  }
+
+  const feed = { items: feedData.items };
   const processedGuids = await getProcessedGuids();
 
   // Oldest first, so drafts land in Notion in chronological order.
@@ -162,7 +157,7 @@ async function main() {
   for (const item of newItems) {
     const title = item.title || "Untitled issue";
     const link = item.link || "";
-    const content = item["content:encoded"] || item.content || item.contentSnippet || "";
+    const content = item.content || item.description || "";
 
     console.log(`Drafting social copy for: ${title}`);
     const socialCopy = await draftSocialCopy({ title, link, content });
