@@ -127,13 +127,23 @@ async function createNotionDraftPage({ title, link, socialCopy }) {
 }
 
 async function main() {
-  const parser = new Parser({
+  const parser = new Parser();
+
+  const feedResponse = await fetch(FEED_URL, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      Accept: "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
+      "Accept-Language": "en-US,en;q=0.9",
     },
   });
-  const feed = await parser.parseURL(FEED_URL);
+
+  if (!feedResponse.ok) {
+    throw new Error(`Failed to fetch Substack feed: ${feedResponse.status} ${feedResponse.statusText}`);
+  }
+
+  const feedXml = await feedResponse.text();
+  const feed = await parser.parseString(feedXml);
   const processedGuids = await getProcessedGuids();
 
   // Oldest first, so drafts land in Notion in chronological order.
