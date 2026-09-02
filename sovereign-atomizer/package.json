@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4"
+    "@supabase/supabase-js": "^2.45.4",
+    "sharp": "^0.33.5",
+    "oauth-1.0a": "^2.2.6"
   }
 }
