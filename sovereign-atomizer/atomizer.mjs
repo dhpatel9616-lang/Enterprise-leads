@@ -60,12 +60,14 @@ Link: ${link}
 Content:
 ${content}
 
-Write three short, distinct social posts promoting this issue and driving people to subscribe/read:
+Write five short, distinct posts promoting this issue and driving people to subscribe/read:
 1. LINKEDIN: professional tone, 3-5 sentences, ends with a call to read/subscribe.
 2. X: under 280 characters, punchy hook.
 3. THREADS: conversational, 2-3 sentences, more personal voice.
+4. INSTAGRAM: caption for a graphic card post — 2-4 sentences plus 3-5 relevant hashtags on their own line at the end.
+5. TIKTOK: short caption/description for a photo-mode post — one punchy sentence plus 3-5 relevant hashtags.
 
-Return ONLY the three posts, each on its own line, prefixed exactly with "LINKEDIN:", "X:", and "THREADS:" — no other commentary.`;
+Return ONLY the five posts, each on its own line, prefixed exactly with "LINKEDIN:", "X:", "THREADS:", "INSTAGRAM:", and "TIKTOK:" — no other commentary.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -89,8 +91,76 @@ Return ONLY the three posts, each on its own line, prefixed exactly with "LINKED
   return text;
 }
 
-async function createNotionDraftPage({ title, link, socialCopy }) {
+function parseSocialCopy(socialCopy) {
+  // Pulls the LINKEDIN:/X:/THREADS:/INSTAGRAM:/TIKTOK:-prefixed lines out of the drafted
+  // text so each platform's copy can be written into its own Notion column.
+  const result = { linkedin: "", x: "", threads: "", instagram: "", tiktok: "" };
+  for (const rawLine of socialCopy.split("\n")) {
+    const line = rawLine.trim();
+    if (/^LINKEDIN:/i.test(line)) result.linkedin = line.replace(/^LINKEDIN:\s*/i, "");
+    else if (/^X:/i.test(line)) result.x = line.replace(/^X:\s*/i, "");
+    else if (/^THREADS:/i.test(line)) result.threads = line.replace(/^THREADS:\s*/i, "");
+    else if (/^INSTAGRAM:/i.test(line)) result.instagram = line.replace(/^INSTAGRAM:\s*/i, "");
+    else if (/^TIKTOK:/i.test(line)) result.tiktok = line.replace(/^TIKTOK:\s*/i, "");
+  }
+  return result;
+}
+
+function wrapText(text, maxCharsPerLine) {
+  const words = text.split(" ");
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    if ((current + " " + word).trim().length > maxCharsPerLine) {
+      if (current) lines.push(current.trim());
+      current = word;
+    } else {
+      current = (current + " " + word).trim();
+    }
+  }
+  if (current) lines.push(current.trim());
+  return lines;
+}
+
+async function generateCardImage(title) {
+  // Instagram and TikTok won't accept a text-only post, so every issue needs a simple
+  // branded card image. Kept intentionally plain (solid background + wrapped title) —
+  // easy to restyle later once there's an actual brand kit.
+  const { default: sharp } = await import("sharp");
+  const lines = wrapText(title, 24).slice(0, 5);
+  const lineHeight = 72;
+  const startY = 540 - ((lines.length - 1) * lineHeight) / 2;
+  const tspans = lines
+    .map((line, i) => `<tspan x="60" y="${startY + i * lineHeight}">${escapeXml(line)}</tspan>`)
+    .join("");
+
+  const svg = `
+    <svg width="1080" height="1080" xmlns="http://www.w3.org/2000/svg">
+      <rect width="1080" height="1080" fill="#101828"/>
+      <text x="60" y="120" font-family="Georgia, serif" font-size="34" fill="#9db2ce" letter-spacing="2">THE SOVEREIGN</text>
+      <text font-family="Georgia, serif" font-size="58" font-weight="bold" fill="#ffffff">${tspans}</text>
+      <text x="60" y="1000" font-family="Georgia, serif" font-size="28" fill="#9db2ce">sovereignnewsletter.substack.com</text>
+    </svg>`;
+
+  const pngBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
+  const filename = `card-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
+
+  const { error: uploadError } = await supabase.storage
+    .from("sovereign-cards")
+    .upload(filename, pngBuffer, { contentType: "image/png" });
+  if (uploadError) throw uploadError;
+
+  const { data } = supabase.storage.from("sovereign-cards").getPublicUrl(filename);
+  return data.publicUrl;
+}
+
+function escapeXml(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function createNotionDraftPage({ title, link, socialCopy, cardImageUrl }) {
   const today = new Date().toISOString().slice(0, 10);
+  const parsed = parseSocialCopy(socialCopy);
 
   const body = {
     parent: { database_id: NOTION_DATABASE_ID },
@@ -100,6 +170,12 @@ async function createNotionDraftPage({ title, link, socialCopy }) {
       Status: { select: { name: "Drafting" } },
       "Publish Date": { date: { start: today } },
       "Ties Back To": { rich_text: [{ text: { content: link } }] },
+      // Threads has no dedicated column yet — its text still lands in the page body below.
+      "LinkedIn Copy": { rich_text: [{ text: { content: parsed.linkedin.slice(0, 2000) } }] },
+      "X Copy": { rich_text: [{ text: { content: parsed.x.slice(0, 2000) } }] },
+      "Instagram Caption": { rich_text: [{ text: { content: parsed.instagram.slice(0, 2000) } }] },
+      "TikTok Caption": { rich_text: [{ text: { content: parsed.tiktok.slice(0, 2000) } }] },
+      "Card Image URL": { url: cardImageUrl },
     },
     children: socialCopy
       .split("\n")
@@ -126,7 +202,19 @@ async function createNotionDraftPage({ title, link, socialCopy }) {
   }
 }
 
+async function ensureCardBucket() {
+  const { data: buckets, error } = await supabase.storage.listBuckets();
+  if (error) throw error;
+  if (!buckets.some((b) => b.name === "sovereign-cards")) {
+    const { error: createError } = await supabase.storage.createBucket("sovereign-cards", { public: true });
+    if (createError) throw createError;
+    console.log("Created public 'sovereign-cards' storage bucket.");
+  }
+}
+
 async function main() {
+  await ensureCardBucket();
+
   const feedResponse = await fetch(RSS2JSON_URL);
 
   if (!feedResponse.ok) {
@@ -162,8 +250,11 @@ async function main() {
     console.log(`Drafting social copy for: ${title}`);
     const socialCopy = await draftSocialCopy({ title, link, content });
 
+    console.log(`Generating card image for: ${title}`);
+    const cardImageUrl = await generateCardImage(title);
+
     console.log(`Writing draft page to Notion for: ${title}`);
-    await createNotionDraftPage({ title, link, socialCopy });
+    await createNotionDraftPage({ title, link, socialCopy, cardImageUrl });
 
     updatedGuids.push(item.guid || item.link);
     // Save progress after each item so a mid-run failure doesn't reprocess earlier ones.
