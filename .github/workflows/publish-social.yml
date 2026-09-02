@@ -1,0 +1,39 @@
+name: Publish Sovereign Social
+
+on:
+  schedule:
+    # ~9:52am ET Tue & Fri (staggered off :00 to avoid GH Actions cron congestion).
+    # Only publishes cards you've manually flipped to "Scheduled" in Notion — nothing
+    # posts without your approval first.
+    - cron: "52 13 * * 2,5"
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sovereign-atomizer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run social publisher
+        run: node publish-social.mjs
+        env:
+          NOTION_DATABASE_ID: ${{ vars.SOVEREIGN_NOTION_DATABASE_ID }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          IG_USER_ID: ${{ vars.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
+          TIKTOK_PRIVACY_LEVEL: "SELF_ONLY"
