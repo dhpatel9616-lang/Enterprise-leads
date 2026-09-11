@@ -287,14 +287,15 @@ async function run() {
         if (outcome === 'sent') detectedSent++;
         continue;
       }
-      if (newDrafts + followupsSent >= config.max_sends_per_run) continue;
       if (!isDue(lead)) continue;
 
       const nextStep = lead.sequence_step + 1;
       if (nextStep === 1) {
+        if (newDrafts >= (config.max_new_drafts_per_run ?? 25)) continue;
         await draftTouch(lead);
         newDrafts++;
       } else {
+        if (followupsSent >= (config.max_followups_per_run ?? 30)) continue;
         await sendFollowupTouch(lead);
         followupsSent++;
       }
@@ -325,7 +326,7 @@ async function run() {
     console.log(`outreach-sequencer: ${skipped} lead(s) skipped due to errors this run — see log above for details.`);
   }
   console.log(
-    `outreach-sequencer: ${leads.length} eligible. ${checked} pending touch-1 draft(s) checked (${detectedSent} detected sent). ${newDrafts} new touch-1 draft(s) created, ${followupsSent} follow-up(s) auto-sent this run.${config.test_mode ? ' [TEST MODE]' : ''}`
+    `outreach-sequencer: ${leads.length} eligible. ${checked} pending touch-1 draft(s) checked (${detectedSent} detected sent). ${newDrafts}/${config.max_new_drafts_per_run ?? 25} new touch-1 draft(s) created, ${followupsSent}/${config.max_followups_per_run ?? 30} follow-up(s) auto-sent this run.${config.test_mode ? ' [TEST MODE]' : ''}`
   );
 }
 
