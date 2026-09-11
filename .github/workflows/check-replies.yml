@@ -2,7 +2,7 @@ name: Check For Lead Replies
 
 on:
   schedule:
-    - cron: '45 13 * * 1-5' # 9:45am ET, Mon-Fri (UTC time — shifts by 1hr around DST)
+    - cron: '17 13 * * 1-5' # ~9:17am ET, Mon-Fri (staggered off :45 to avoid GH Actions cron congestion)
   workflow_dispatch: {}
 
 jobs:
