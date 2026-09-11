@@ -278,6 +278,7 @@ async function run() {
   let followupsSent = 0;
 
   let skipped = 0;
+  let rateLimited = 0;
 
   for (const lead of leads) {
     try {
@@ -300,6 +301,18 @@ async function run() {
         followupsSent++;
       }
     } catch (err) {
+      const isRateLimit = /rateLimitExceeded|RESOURCE_EXHAUSTED|Quota exceeded/i.test(err.message);
+      if (isRateLimit) {
+        // Transient — Gmail's per-minute quota tripped, likely because there
+        // were enough leads left to check that we ran through the budget.
+        // Every remaining check this run would fail the same way, so stop
+        // here rather than burning through them one at a time. Leave this
+        // lead (and everything behind it) completely untouched — it'll be
+        // re-checked from where we left off next run.
+        rateLimited++;
+        console.error(`outreach-sequencer: hit Gmail's rate limit while checking "${lead.business_name}" — stopping this run early. ${leads.length - checked - newDrafts - followupsSent} lead(s) left unchecked, will retry next run.`);
+        break;
+      }
       // One bad record (e.g. a malformed scraped email) should never
       // take down every other lead behind it in this run. Log it,
       // clear the email so it falls out of eligibility and gets
@@ -322,6 +335,9 @@ async function run() {
     }
   }
 
+  if (rateLimited > 0) {
+    console.log(`outreach-sequencer: stopped early after a rate-limit error — see log above.`);
+  }
   if (skipped > 0) {
     console.log(`outreach-sequencer: ${skipped} lead(s) skipped due to errors this run — see log above for details.`);
   }
