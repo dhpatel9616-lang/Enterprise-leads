@@ -2,7 +2,7 @@ name: Send Leads Digest
 
 on:
   schedule:
-    - cron: '30 12 * * 1-5' # 8:30am ET, Mon-Fri (UTC time — shifts by 1hr around DST)
+    - cron: '58 12 * * 1-5' # ~8:58am ET, Mon-Fri (staggered off :30 to avoid GH Actions cron congestion)
   workflow_dispatch: {}
 
 jobs:
