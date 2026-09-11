@@ -2,7 +2,7 @@ name: Enrich Lead Emails
 
 on:
   schedule:
-    - cron: '10 12 * * 1-5' # 8:10am ET, Mon-Fri (UTC time — shifts by 1hr around DST)
+    - cron: '24 12 * * 1-5' # ~8:24am ET, Mon-Fri (staggered off :10 to avoid GH Actions cron congestion)
   workflow_dispatch: {}
 
 jobs:
