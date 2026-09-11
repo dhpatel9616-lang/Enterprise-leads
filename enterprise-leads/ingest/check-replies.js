@@ -78,7 +78,15 @@ async function run() {
     try {
       const replied = await threadHasReply(lead.gmail_thread_id, ownEmail);
       if (replied) {
-        await supabase.from('leads').update({ status: 'replied' }).eq('id', lead.id);
+        // A reply proves touch 1 (or whichever touch was last drafted) was
+        // actually sent — clear the stale pending-draft marker and advance
+        // the step so this lead's record doesn't look frozen at step 0.
+        await supabase.from('leads').update({
+          status: 'replied',
+          gmail_draft_id: null,
+          sequence_step: Math.max(lead.sequence_step, 1),
+          last_contacted: lead.last_contacted || new Date().toISOString(),
+        }).eq('id', lead.id);
         await noteReplyInNotion(lead);
         repliedCount++;
         console.log(`check-replies: ${lead.business_name} replied — sequence paused.`);
