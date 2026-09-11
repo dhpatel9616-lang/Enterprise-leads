@@ -2,7 +2,7 @@ name: Send Outreach Touches
 
 on:
   schedule:
-    - cron: '0 14 * * 1-5' # 10:00am ET, Mon-Fri (UTC time — shifts by 1hr around DST)
+    - cron: '34 13 * * 1-5' # ~9:34am ET, Mon-Fri (staggered off :00 to avoid GH Actions cron congestion)
   workflow_dispatch: {}
 
 jobs:
