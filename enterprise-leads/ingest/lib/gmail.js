@@ -3,7 +3,16 @@
 // No googleapis SDK — just plain REST calls, consistent with the rest
 // of this codebase's zero-dependency style.
 
+// Cached for the life of this process — every Gmail call in a run was
+// previously exchanging its own fresh access token, which alone doubled
+// the API calls per lead and was the main driver of hitting Gmail's
+// per-minute quota partway through a run.
+let cachedAccessToken = null;
+let cachedTokenExpiresAt = 0;
+
 async function getAccessToken() {
+  if (cachedAccessToken && Date.now() < cachedTokenExpiresAt) return cachedAccessToken;
+
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -16,7 +25,11 @@ async function getAccessToken() {
   });
   const data = await res.json();
   if (!res.ok) throw new Error(`Gmail token refresh failed: ${JSON.stringify(data)}`);
-  return data.access_token;
+
+  cachedAccessToken = data.access_token;
+  // Tokens last ~3600s; refresh a couple minutes early to be safe.
+  cachedTokenExpiresAt = Date.now() + ((data.expires_in || 3000) - 120) * 1000;
+  return cachedAccessToken;
 }
 
 function base64url(str) {
@@ -83,7 +96,7 @@ async function createDraft({ to, subject, html, replyTo, threadId }) {
 // assumption to the person.
 async function draftStillPending(draftId) {
   const accessToken = await getAccessToken();
-  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`, {
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}?format=minimal`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (res.status === 404) return false;
