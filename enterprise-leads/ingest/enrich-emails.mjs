@@ -11,6 +11,61 @@
 // Run manually with:  node scripts/enrich-emails.mjs
 
 import { createClient } from "@supabase/supabase-js";
+import { existsSync } from "node:fs";
+import puppeteer from "puppeteer-core";
+
+// GitHub's ubuntu-latest runners ship a system Chrome — using it directly
+// avoids downloading a separate Chromium bundle on every run.
+const CHROME_PATHS = [
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/google-chrome",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/chromium",
+];
+
+let browserPromise = null;
+function getBrowser() {
+  if (browserPromise) return browserPromise;
+  browserPromise = (async () => {
+    const executablePath = CHROME_PATHS.find((p) => existsSync(p));
+    if (!executablePath) {
+      console.warn("enrich-emails: no system Chrome found — skipping the JS-rendering fallback for this run.");
+      return null;
+    }
+    return puppeteer.launch({
+      executablePath,
+      headless: true,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    });
+  })();
+  return browserPromise;
+}
+
+async function closeBrowser() {
+  const browser = await (browserPromise || Promise.resolve(null));
+  if (browser) await browser.close();
+}
+
+// For sites that render their contact info client-side (React/Vue/Wix-style
+// pages where the raw HTML is nearly empty) — a real browser sees what a
+// plain fetch can't. Only used as a fallback since it's much slower.
+async function fetchRenderedHtml(url, timeoutMs) {
+  const browser = await getBrowser();
+  if (!browser) return null;
+  let page;
+  try {
+    page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (compatible; WadeCapitalOutreachBot/1.0; +mailto:wadecapitallc@gmail.com)"
+    );
+    await page.goto(url, { waitUntil: "networkidle2", timeout: timeoutMs });
+    return await page.content();
+  } catch {
+    return null;
+  } finally {
+    if (page) await page.close().catch(() => {});
+  }
+}
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -26,7 +81,12 @@ const DEFAULT_SETTINGS = {
   max_leads_per_run: 25,
   request_timeout_ms: 8000,
   retry_after_days: 30,
-  subpaths: ["/contact", "/contact-us", "/about", "/about-us", "/contact.html"],
+  subpaths: [
+    "/contact", "/contact-us", "/contact-us.html", "/contact.html",
+    "/about", "/about-us",
+    "/reach-us", "/get-in-touch", "/connect",
+    "/team", "/staff",
+  ],
 };
 
 // Domains/patterns that are never real contact emails, even though they look
@@ -166,6 +226,22 @@ async function findEmailForSite(siteUrl, settings) {
     }
   }
 
+  // Nothing in the raw HTML anywhere — try rendering just the homepage
+  // and contact page with a real browser before giving up. Slower, so
+  // it's deliberately limited to two pages rather than the full subpath list.
+  const contactUrl = urlsToTry.find((u) => /contact/i.test(u));
+  const renderUrls = [siteUrl, contactUrl].filter(Boolean);
+  for (const url of renderUrls) {
+    const html = await fetchRenderedHtml(url, settings.request_timeout_ms);
+    if (!html) continue;
+
+    const emails = extractEmails(html);
+    const best = pickBestEmail(emails, domain);
+    if (best) {
+      return { email: best, result: "found_rendered" };
+    }
+  }
+
   return { email: null, result: "not_found" };
 }
 
@@ -243,6 +319,7 @@ async function main() {
   }
 
   console.log(`Done. Found emails for ${foundCount}/${leads.length} leads.`);
+  await closeBrowser();
 }
 
 main();
