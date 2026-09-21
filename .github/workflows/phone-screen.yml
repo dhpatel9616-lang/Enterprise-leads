@@ -1,0 +1,25 @@
+name: Enterprise Leads — Phone Screening
+
+on:
+  schedule:
+    - cron: '23 13 * * 1-5' # ~9:23am ET, Mon-Fri (staggered off :00 to avoid GH Actions top-of-hour cron congestion)
+  workflow_dispatch: {}
+
+jobs:
+  phone-screen:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "enterprise-leads"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run phone-screen
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
