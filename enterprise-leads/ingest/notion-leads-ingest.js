@@ -1,52 +1,344 @@
-Enterprise Leads & Sovereign Automation — Continuation Brief
-Sep 15, 2026 · @deven
-Context
-This continues a long working session on The Enterprise's lead-gen pipeline (Enterprise Leads repo, github.com/dhpatel9616-lang/Enterprise-leads) and The Sovereign's social auto-promotion (Sovereign Atomizer, same repo). Full background on the business structure, sequencing, and long-term architecture is already in the project's memory files — this brief only covers what changed and what's still open from this session, so a new conversation can pick up mid-stream without re-deriving any of it.
-Two Supabase projects are involved and require different connector authorizations: PoolParty/Global Aggregate (one account/org) and Enterprise Leads — internally named "Opportunity Automation," project ref skakrtljfaeopfqigyww (a separate account/org, qssfcjmtbcufpkrnexfg). Whoever continues this needs the Supabase MCP connector authorized to the Enterprise Leads side specifically — see the environment notes section below for the reauth path.
-Fixed and shipped — outreach sequencing
-1. Cron congestion. All six lead-pipeline workflows fired 9–11 hours late because they clustered at round-number UTC minutes, the most contested slots on GitHub's shared scheduler. Staggered every workflow off round numbers.
-2. Gmail API rate-limit bug (the big one). outreach-sequencer.js was exchanging a fresh OAuth token and making a separate Gmail call per lead, sequentially, with no caching. With 100+ leads to check, this blew through Gmail's per-minute quota partway through every run — and any lead that failed mid-quota-exhaustion got its email permanently wiped, disqualifying it forever. This was the real cause of the daily volume declining from 15 → 2 → 0 drafts. Fixed in lib/gmail.js: the access token is now cached for the life of the process, and draft checks fetch ?format=minimal instead of the full message body.
-3. Rate-limit errors no longer destroy leads. outreach-sequencer.js now recognizes a quota/rate-limit error as transient — it logs it, stops the run cleanly, and leaves every untouched lead alone for the next run, instead of wiping emails.
-4. Split the shared send cap. max_sends_per_run counted new touch-1 drafts and auto-sent follow-ups against the same budget, so a busy follow-up day starved new drafts. Split into independent max_new_drafts_per_run (default 25) and max_followups_per_run (default 30).
-5. Reply detection was leaving leads looking stuck. check-replies.js marked a lead status: replied without clearing its gmail_draft_id or advancing sequence_step — so genuine successes looked identical to stuck leads. Fixed going forward, and ran a one-time repair on the 22 leads already affected.
-Fixed and shipped — sourcing and enrichment
-The enrichment funnel (checked directly in Supabase): 297 leads total, 189 enrichment attempts, only 70 found (37% hit rate), 119 not found, 64 never-yet-attempted, 44 with no usable site at all. The max_leads_per_run/max_new_leads_per_run caps were already generous (25–30) — the real bottleneck was a single 12 km radius around State College exhausting its local business pool after weeks of daily scraping, plus a basic regex-only scraper with no JS rendering.
-1. Wider net. enrich-emails.mjs now tries 6 more contact-page conventions, and falls back to a real headless-browser render (using the GitHub runner's built-in Chrome, no extra download) of the homepage + contact page when plain HTML finds nothing — catches React/Vue/Wix sites that hide contact info behind JavaScript.
-2. Bigger addressable market. Live Supabase update: State College radius 12 km → 36 km, max_new_leads_per_run 30 → 50.
-3. Geographic expansion to Northern Virginia/DC. Added two new locations (Washington, DC and Arlington, VA, 25 km radius each) to places_queries. Locations × categories are independent axes, so all 30 existing categories — including "law firms," which already maps to the legal_ai product line and "Legal AI Client" Notion tag — now get searched there automatically.
-4. Fixed a cap-sharing bug this expansion would have hit. CATEGORY_CAP_PER_RUN was keyed by category only, so "law firms in State College" and "law firms in DC" would have competed for the same shared budget. Now keyed by category::location, and the per-category cap was raised from 2 to 5 to actually use the bigger daily budget.
-Live Supabase changes already applied (no push needed)
-These are done and live in the settings table of the Enterprise Leads project — nothing to push for these specifically:
-Setting key
-Change
-outreach.test_mode
-Confirmed false (was already off, not the issue it first looked like)
-places_queries.locations[0].radius_meters
-12,000 → 36,000
-places_queries.locations
-Added Washington, DC and Arlington, VA (25 km each)
-places_queries.max_new_leads_per_run
-30 → 50
-email_enrichment.subpaths
-Expanded to match the new code default (11 paths, up from 5)
-One-time repair
-Cleared stale gmail_draft_id and advanced sequence_step for the 22 leads already marked replied
-CRITICAL open item — Gmail account mismatch, unresolved
-This is the single most important loose thread. After the rate-limit fix, a clean run checked all 103–106 pending leads with zero errors and found 0 detected as sent — Gmail's own API says every one of them is still genuinely an unsent draft, even though Deven reports having received and sent roughly 126 drafts over time.
-To settle this, lib/gmail.js and outreach-sequencer.js were given a temporary diagnostic (peekDrafts() + getOwnEmailAddress()) that prints, at the start of every run: which Gmail account the automation is actually authenticated as, and a sample of real drafts (recipient + subject) currently sitting in that account's Drafts folder.
-Status: these files were handed off but never confirmed pushed, run, or the log shared. This needs to happen before trusting that any of the pending drafts are actually reachable/actionable by Deven. Once resolved, remove the diagnostic block (marked TEMPORARY DIAGNOSTIC in the code comments).
-Open item — sourcing/enrichment fixes need push + verification
-enrich-emails.mjs, notion-leads-ingest.js, and enterprise-leads/package.json (adds puppeteer-core) were delivered in this session's final stretch. Push status not yet confirmed, and no run has happened against the new code or the wider-radius/NoVA-DC settings yet.
-Next steps once pushed: manually trigger Enterprise Leads — Ingest Leads and Enrich Lead Emails, then re-check the enrichment funnel numbers over a few days (not just one run) before assuming the new hit rate holds — real-world website quality in the wider radius and the new metro area is untested.
-Open item — outbound calling, direction chosen, nothing built
-Deven wants calling as a channel ("calling is more effective" than email). Walked through the compliance landscape: AI-generated voice is now legally "artificial voice" under TCPA (2024 FCC ruling), disclosure is expected in most states, penalties are $500–$1,500 per call with no cap and a private right of action — and law firms (one of the two target segments) are specifically well-positioned to recognize and act on a violation. A pre-recorded voicemail does not get lighter treatment than a live AI call for personal-cell numbers, which is a large share of small-business "landlines" sourced via Google Places.
-Decision: start with an AI-assisted dialer where Deven makes the actual calls himself — auto-dial through the queue, live transcription/notes, structured logging back to Notion/Supabase, phone-type screening (Twilio Lookup: mobile vs. landline vs. VoIP) as a first step regardless of future direction. This sidesteps the TCPA/AI-disclosure regime entirely since no synthetic voice is involved. A turnkey AI voice agent (Vapi/Retell/Bland-style, reserved for confirmed landlines with proper disclosure) was flagged as a possible later tier if volume outgrows manual dialing.
-Nothing has been built yet — the last message asked whether to start on the dialer + phone-screening step, and the conversation ended there.
-Open item — Sovereign social auto-posting, code built, accounts pending
-From earlier in this session (before the outreach debugging detour): atomizer.mjs now drafts LinkedIn/X/Threads/Instagram/TikTok copy and generates a branded card image (via Supabase Storage) for every new Substack issue. publish-social.mjs + a twice-weekly workflow will publish to X, Instagram, and TikTok once approved (Notion status flipped to Scheduled) — chosen platforms were X, Instagram, and TikTok specifically (not LinkedIn/Threads).
-Still blocking: Deven had not yet set up developer access for any of the three chosen platforms as of the last check-in — X (OAuth 1.0a keys, now pay-per-use since Feb 2026), Instagram (Meta app + long-lived token + IG_USER_ID, though he had converted the Instagram account itself), and TikTok (Content Posting API, will be private-only until audited, plus its access token expires every 24 hours — a refresh workflow was explicitly deferred pending audit status). "Move to Sovereign promotion" was the explicit next step before the email debugging detour consumed most of this session — worth resuming once the outreach issues above are confirmed stable.
-Environment notes for continuity
-• Supabase connector switching: the two projects (PoolParty/Global Aggregate vs. Enterprise Leads) sit under different accounts/orgs. Switching requires Settings → Connectors → Supabase → Disconnect → Reconnect, picking the right account/org at the OAuth screen. This has come up repeatedly — worth checking which is currently authorized before assuming leads-table access.
-• GitHub's public API rate limit is essentially always saturated from this environment's shared egress IP — direct Actions-log fetching via api.github.com is unreliable. Pasted workflow-run logs from Deven have been the reliable path to real evidence throughout this session.
-• The sandbox container can reset between turns (loses the cloned repo at /home/claude/repo, though /mnt/user-data/outputs persists) — re-clone with git clone --depth 1 https://github.com/dhpatel9616-lang/Enterprise-leads.git as needed, and always git pull before trusting local file state, since Deven's own pushes land independently.
-• Settings live in Supabase's settings table (key/value JSONB, keys used so far: outreach, places_queries, email_enrichment), editable via direct SQL or a dashboard/settings.html in the repo — not just via code defaults.
+/**
+ * Sources local businesses via Google Places, flags ones with a
+ * missing/weak website AND/OR no detectable social media presence,
+ * classifies WHICH they need (website / social / both), and writes
+ * them into Notion's "Raw Leads Inbox" + mirrors to Supabase.
+ *
+ * Locations and business categories are independent axes in settings
+ * — every category is searched in every location, so adding one new
+ * location instantly applies to all existing categories and vice
+ * versa.
+ *
+ * Requires GOOGLE_PLACES_API_KEY, NOTION_TOKEN, NOTION_DATABASE_ID,
+ * SUPABASE_URL, SUPABASE_SERVICE_KEY. No-ops safely if any are missing.
+ */
+const { createClient } = require('@supabase/supabase-js');
+const { loadSetting } = require('./lib/settings');
+
+const PLACES_KEY = process.env.GOOGLE_PLACES_API_KEY;
+const NOTION_TOKEN = process.env.NOTION_TOKEN;
+const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+if (!PLACES_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  console.log('notion-leads-ingest: one or more required secrets are missing. Skipping run.');
+  process.exit(0);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const NOTION_VERSION = '2022-06-28';
+
+const EMAIL_SHAPE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+
+// Some sites HTML-entity-encode their contact email to defeat simple
+// regex scrapers (e.g. "info@x.com" becomes "&#105;&#110;&#102;...").
+// Decode before validating, and only accept the result if it actually
+// looks like an email — otherwise a stray "mailto:#" or similar junk
+// ends up stored as someone's "email address."
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&amp;/g, '&');
+}
+
+function isValidEmailShape(email) {
+  return EMAIL_SHAPE.test(email) && email !== 'wadecapitallc@gmail.com';
+}
+const NOTION_API = 'https://api.notion.com/v1';
+
+const SOCIAL_DOMAINS = ['facebook.com/', 'instagram.com/', 'twitter.com/', 'x.com/', 'tiktok.com/', 'linkedin.com/company'];
+
+// Some categories aren't being evaluated for "does this business need a
+// website/social fix" at all — the pitch is something else entirely, and
+// every business in that category is worth reaching regardless of how
+// good their existing site looks. 'legal' -> AI Governance Readiness
+// Audit is the first case. Add more (category -> need_type) here as new
+// non-website pitches launch, rather than writing new classifier logic.
+const CATEGORY_NEED_OVERRIDES = {
+  legal: 'governance_audit',
+};
+
+// Which `product` value a lead should be tagged with in Supabase, keyed
+// by category. Anything not listed here defaults to 'enterprise'.
+const CATEGORY_PRODUCT_MAP = {
+  legal: 'legal_ai',
+};
+
+// Suggested Notion category tag, keyed by category. Anything not listed
+// here defaults to 'Website Client'.
+const CATEGORY_SUGGESTED_TAG = {
+  legal: 'Legal AI Client',
+};
+
+async function searchPlaces(query, locationBias) {
+  const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': PLACES_KEY,
+      'X-Goog-FieldMask':
+        'places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.id',
+    },
+    body: JSON.stringify({
+      textQuery: query.q,
+      locationBias: {
+        circle: {
+          center: { latitude: locationBias.lat, longitude: locationBias.lng },
+          radius: locationBias.radius_meters,
+        },
+      },
+      maxResultCount: 15,
+    }),
+  });
+  const data = await res.json();
+  return data.places || [];
+}
+
+// Checks the business's own site for: does it exist, is it mobile
+// responsive, is it on SSL, is there a mailto: email, and does it
+// LINK to any social platform. That last check is the only way we
+// have to detect social presence — there's no direct API for it —
+// so hasSocial is only meaningful (true/false) when hasSite is true.
+// When there's no site at all, hasSocial comes back null ("unknown"),
+// not false — we never claim a business lacks social media when we
+// simply had no way to check.
+async function checkSite(url) {
+  if (!url) return { hasSite: false, hasSsl: false, mobileOk: false, email: null, hasSocial: null };
+  const hasSsl = url.startsWith('https://');
+  let mobileOk = false;
+  let email = null;
+  let hasSocial = false;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const html = await res.text();
+    mobileOk = /<meta[^>]+name=["']viewport["']/i.test(html);
+    const mailtoMatch = html.match(/mailto:([^"'?\s]+)/i);
+    if (mailtoMatch) {
+      const candidate = decodeHtmlEntities(mailtoMatch[1]).trim().toLowerCase();
+      if (isValidEmailShape(candidate)) email = candidate;
+    }
+    hasSocial = SOCIAL_DOMAINS.some((domain) => html.toLowerCase().includes(domain));
+  } catch {
+    mobileOk = false;
+  }
+  return { hasSite: true, hasSsl, mobileOk, email, hasSocial };
+}
+
+// The core tailoring decision: what does this business actually need?
+// 'website' — no site, or a broken one (drives the pitch even if
+//   social status is unknown, since a broken site is the bigger issue).
+// 'social' — the site itself is fine, but no social links found on it.
+// 'both' — site has real problems AND no social links found.
+function classifyNeed({ hasSite, hasSsl, mobileOk, hasSocial }) {
+  const websiteBad = !hasSite || !hasSsl || !mobileOk;
+  const socialBad = hasSite === true && hasSocial === false;
+  if (websiteBad && socialBad) return 'both';
+  if (websiteBad) return 'website';
+  if (socialBad) return 'social';
+  return null; // neither — not a lead
+}
+
+async function alreadyExists(businessName) {
+  const res = await fetch(`${NOTION_API}/databases/${NOTION_DATABASE_ID}/query`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': NOTION_VERSION,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      filter: { property: 'Company', rich_text: { equals: businessName } },
+      page_size: 1,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Notion query failed: ${JSON.stringify(data)}`);
+  return (data.results || []).length > 0;
+}
+
+async function createLeadPage({ businessName, phone, siteUrl, hasSite, hasSsl, mobileOk, email, hasSocial, needType, category, locationName, placeId }) {
+  const socialLine =
+    hasSocial === null ? 'Social media: unknown (no site to check)' : `Social media found on site: ${hasSocial ? 'yes' : 'NO'}`;
+  const notesLines = [
+    `Category: ${category}`,
+    `Needs: ${needType}`,
+    `Phone: ${phone || 'none listed'}`,
+    `Email: ${email || 'not found — needs manual lookup'}`,
+    hasSite ? `Site: ${siteUrl}` : 'Site: none found',
+    hasSite ? `SSL: ${hasSsl ? 'yes' : 'NO'}` : '',
+    hasSite ? `Mobile-friendly: ${mobileOk ? 'yes' : 'NO'}` : '',
+    socialLine,
+    `Google Place ID: ${placeId}`,
+  ].filter(Boolean);
+
+  const suggestedTag = CATEGORY_SUGGESTED_TAG[category] || 'Website Client';
+
+  const res = await fetch(`${NOTION_API}/pages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': NOTION_VERSION,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      parent: { database_id: NOTION_DATABASE_ID },
+      properties: {
+        'Lead Name': { title: [{ text: { content: businessName } }] },
+        Company: { rich_text: [{ text: { content: businessName } }] },
+        'Raw Notes': { rich_text: [{ text: { content: notesLines.join('\n') } }] },
+        'Review Status': { select: { name: 'Unreviewed' } },
+        'Suggested Category': { multi_select: [{ name: suggestedTag }] },
+        'Source Detail': { rich_text: [{ text: { content: `Google Places — ${category} — ${locationName}` } }] },
+        'Date Captured': { date: { start: new Date().toISOString().slice(0, 10) } },
+      },
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Notion create page failed: ${JSON.stringify(data)}`);
+  return data.id;
+}
+
+async function mirrorToSupabase({ businessName, category, phone, email, siteUrl, hasSsl, mobileOk, hasSocial, needType, notionPageId }) {
+  const { data: existing } = await supabase
+    .from('leads')
+    .select('id')
+    .eq('business_name', businessName)
+    .eq('site_url', siteUrl)
+    .maybeSingle();
+
+  if (existing) return;
+
+  const product = CATEGORY_PRODUCT_MAP[category] || 'enterprise';
+
+  await supabase.from('leads').insert({
+    business_name: businessName,
+    category,
+    phone,
+    email,
+    site_url: siteUrl,
+    has_ssl: hasSsl,
+    mobile_ok: mobileOk,
+    has_social: hasSocial,
+    need_type: needType,
+    product,
+    status: 'new',
+    sequence_step: 0,
+    notion_page_id: notionPageId,
+  });
+}
+
+function shuffle(arr) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+// Locations and categories are independent lists in settings — this
+// builds every (location × category) combination as its own search.
+// Add one new location and every existing category gets searched
+// there automatically, and vice versa.
+function buildQueries(config) {
+  const combos = [];
+  for (const location of config.locations) {
+    for (const cat of config.categories) {
+      combos.push({
+        q: `${cat.search_term} in ${location.name}`,
+        category: cat.category,
+        locationName: location.name,
+        locationBias: { lat: location.lat, lng: location.lng, radius_meters: location.radius_meters },
+      });
+    }
+  }
+  return combos;
+}
+
+// How many leads a single (category, location) combo is allowed to
+// contribute in one run — keeps the daily batch a genuine mix of
+// business types and locations instead of letting one combo (e.g.
+// restaurants in State College, if it happens to return the most
+// hits) fill the whole day's quota on its own. Keyed by
+// category::location, NOT category alone — otherwise "law firms in
+// State College" and "law firms in DC" would compete for the same
+// shared budget the moment a second location is added.
+const CATEGORY_CAP_PER_RUN = 5;
+
+// Ranks candidates so the worst-off businesses (biggest real opportunity)
+// get written first within a category, rather than whatever order Google
+// Places happens to return. No website at all is the clearest gap; a
+// site with real problems (no SSL, not mobile-friendly) is next; missing
+// social alone is the mildest signal.
+function priorityScore({ hasSite, hasSsl, mobileOk, hasSocial, needType }) {
+  let score = 0;
+  if (!hasSite) score += 4;
+  else {
+    if (!hasSsl) score += 2;
+    if (!mobileOk) score += 2;
+  }
+  if (hasSocial === false) score += 2;
+  if (needType === 'both') score += 1;
+  return score;
+}
+
+async function run() {
+  const config = await loadSetting(supabase, 'places_queries');
+  const maxNew = config.max_new_leads_per_run ?? 10;
+  const queries = shuffle(buildQueries(config)); // rotate which location×category combos win the daily cap
+
+  let processed = 0;
+  let flagged = 0;
+  let written = 0;
+  const categoryCounts = {};
+
+  for (const query of queries) {
+    if (written >= maxNew) break;
+    const comboKey = `${query.category}::${query.locationName}`;
+    if ((categoryCounts[comboKey] || 0) >= CATEGORY_CAP_PER_RUN) continue; // this category/location combo already had its share today — try the next for variety
+
+    const places = await searchPlaces(query, query.locationBias);
+    const candidates = [];
+
+    for (const place of places) {
+      const businessName = place.displayName?.text || 'Unknown';
+      const siteUrl = place.websiteUri || null;
+      const phone = place.nationalPhoneNumber || null;
+      const { hasSite, hasSsl, mobileOk, email, hasSocial } = await checkSite(siteUrl);
+      const needType = CATEGORY_NEED_OVERRIDES[query.category] || classifyNeed({ hasSite, hasSsl, mobileOk, hasSocial });
+      processed++;
+      if (!needType) continue;
+      flagged++;
+      candidates.push({
+        businessName, siteUrl, phone, hasSite, hasSsl, mobileOk, email, hasSocial, needType, placeId: place.id,
+        score: priorityScore({ hasSite, hasSsl, mobileOk, hasSocial, needType }),
+      });
+    }
+
+    candidates.sort((a, b) => b.score - a.score); // prime (worst web/social presence) candidates first
+
+    for (const c of candidates) {
+      if (written >= maxNew) break;
+      if ((categoryCounts[comboKey] || 0) >= CATEGORY_CAP_PER_RUN) break;
+
+      const exists = await alreadyExists(c.businessName);
+      if (exists) continue;
+
+      const notionPageId = await createLeadPage({ ...c, category: query.category, locationName: query.locationName });
+      await mirrorToSupabase({ ...c, category: query.category, notionPageId });
+      written++;
+      categoryCounts[comboKey] = (categoryCounts[comboKey] || 0) + 1;
+    }
+  }
+
+  console.log(
+    `notion-leads-ingest: processed ${processed}, flagged ${flagged}, wrote ${written} new leads across ${Object.keys(categoryCounts).length} category/location combos (cap: ${maxNew}, max ${CATEGORY_CAP_PER_RUN}/combo).`
+  );
+}
+
+run().catch((err) => {
+  console.error('notion-leads-ingest failed:', err);
+  process.exit(1);
+});
