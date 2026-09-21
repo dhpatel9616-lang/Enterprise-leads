@@ -9,7 +9,8 @@
     "digest": "node ingest/send-leads-digest.js",
     "outreach": "node ingest/outreach-sequencer.js",
     "check-replies": "node ingest/check-replies.js",
-    "enrich": "node ingest/enrich-emails.mjs"
+    "enrich": "node ingest/enrich-emails.mjs",
+    "phone-screen": "node ingest/phone-screen.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
