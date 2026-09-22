@@ -103,6 +103,18 @@ const JUNK_PATTERNS = [
   /^postmaster@/i,
   /wordpress\.(com|org)$/i,
   /sentry-next\.wixpress\.com$/i,
+  // Un-replaced site-builder/template placeholder addresses — these
+  // show up verbatim on small-business sites that were never fully
+  // customized past the starter template (very common on photography/
+  // real-estate template sites). They pass EMAIL_SHAPE fine, which is
+  // exactly why they need an explicit block: they look real.
+  /@domain\.com$/i,
+  /@yourdomain\.com$/i,
+  /@yoursite\.com$/i,
+  /@yourcompany\.com$/i,
+  /@mysite\.com$/i,
+  /@website\.com$/i,
+  /^(user|name|your ?name|email|info|test)@(domain|yourdomain|yoursite|example|test)\./i,
   // Our own outreach bot's User-Agent header includes
   // "mailto:wadecapitallc@gmail.com" for abuse-contact purposes. If a
   // site's response ever echoes back request headers (error pages,
