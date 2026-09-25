@@ -107,6 +107,20 @@ async function draftStillPending(draftId) {
   return true;
 }
 
+// Sends an existing draft exactly as it sits in the Drafts folder (including
+// any edits made to it in Gmail). Returns the sent message { id, threadId }.
+async function sendDraft(draftId) {
+  const accessToken = await getAccessToken();
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: draftId }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Gmail draft send failed: ${JSON.stringify(data)}`);
+  return data;
+}
+
 // The Gmail address the automation is authorized as — used by
 // check-replies.js to tell "a reply came in" apart from "this is one
 // of our own sent messages."
@@ -131,4 +145,4 @@ async function getThreadMessages(threadId) {
   return data.messages || [];
 }
 
-module.exports = { sendGmail, createDraft, draftStillPending, getOwnEmailAddress, getThreadMessages };
+module.exports = { sendGmail, createDraft, draftStillPending, sendDraft, getOwnEmailAddress, getThreadMessages };

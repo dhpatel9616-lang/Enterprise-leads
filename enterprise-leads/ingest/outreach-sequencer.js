@@ -3,19 +3,26 @@
  * outreach cycle:
  *
  *   - TOUCH 1 (first contact with a new lead) is always drafted, never
- *     auto-sent. A Gmail DRAFT gets created and synced to Notion's
- *     "Drafted Message" field, and nothing goes out until you review and
- *     send it yourself. On a later run, the script checks whether that
- *     draft is still sitting there (still pending) or gone (assumed
- *     sent — Gmail can't tell "you sent it" apart from "you deleted it").
- *   - TOUCHES 2-6 (follow-ups) auto-send once due, no draft step. The
- *     idea: you've already reviewed and approved this lead once by
- *     sending touch 1 yourself, so the follow-ups you already wrote are
- *     trusted to go out on their own from there.
+ *     auto-sent without approval. A Gmail DRAFT gets created and synced to
+ *     Notion's "Drafted Message" + "Offer" fields (see the "Outreach
+ *     Approvals" view). On a later run, if the lead's "Approve" checkbox
+ *     is ticked in Notion, the script sends that exact Gmail draft. You can
+ *     also still send it by hand from Gmail; a draft that's gone is
+ *     assumed sent (Gmail can't tell "you sent it" apart from "you
+ *     deleted it").
+ *   - TOUCHES 2-6 (follow-ups) auto-send once due, no draft step. You
+ *     approved this lead once at touch 1, so follow-ups go out on their
+ *     own until the lead replies (check-replies.js sets status 'replied',
+ *     which drops it out of fetchEligibleLeads) or opts out (an opt-out
+ *     is a reply, so it stops the same way).
  *
- * If you don't want a drafted touch-1 to send, leave it alone rather
- * than deleting it — an untouched draft just pauses that lead
- * harmlessly, since nothing downstream advances until it's gone.
+ * Every touch carries an opt-out line. Business service pitches
+ * (BUSINESS_NEED_TYPES) also carry settings.outreach.physical_address, as
+ * CAN-SPAM requires; the address is private and never goes anywhere else.
+ * The run skips entirely until that address is set.
+ *
+ * If you don't want a drafted touch-1 to send, just leave "Approve"
+ * unticked — the draft pauses that lead harmlessly.
  *
  * Touch 1 differs by need_type (settings.outreach.touch_sets).
  * Touches 2+ are shared copy (settings.outreach.followups) with an
@@ -30,7 +37,7 @@
  */
 const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
-const { createDraft, draftStillPending, sendGmail } = require('./lib/gmail');
+const { createDraft, draftStillPending, sendDraft, sendGmail } = require('./lib/gmail');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -56,6 +63,21 @@ const OFFER_PHRASES = {
   reciprocal_link: 'a reciprocal link',
   research_contact: 'GlobalAggregate as a research tool',
   governance_audit: 'the AI Governance Readiness Audit',
+};
+
+// Wade Capital service pitches to businesses — the only emails that carry
+// the mailing address (GlobalAggregate researcher/link outreach does not).
+const BUSINESS_NEED_TYPES = ['website', 'social', 'both', 'governance_audit'];
+
+// Short human label shown in Notion's "Offer" field so the approval view
+// says plainly what each draft is pitching.
+const OFFER_LABELS = {
+  website: 'Website studio',
+  social: 'Social media management',
+  both: 'Website studio + social media',
+  reciprocal_link: 'GlobalAggregate reciprocal link',
+  research_contact: 'GlobalAggregate research tool',
+  governance_audit: 'Legal AI: AI Governance Readiness Audit',
 };
 
 function issueLine(lead) {
@@ -126,6 +148,18 @@ async function notionPatch(pageId, properties) {
   if (!res.ok) console.error(`Notion property update failed: ${await res.text()}`);
 }
 
+// Touch 1 only sends when the lead's "Approve" checkbox is ticked in
+// Notion. Missing token/page or any API error reads as "not approved".
+async function notionApproved(pageId) {
+  if (!NOTION_TOKEN || !pageId) return false;
+  const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION },
+  });
+  if (!res.ok) return false;
+  const page = await res.json();
+  return page.properties?.Approve?.checkbox === true;
+}
+
 async function notionComment(pageId, text) {
   if (!NOTION_TOKEN || !pageId) return;
   await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
@@ -144,10 +178,11 @@ async function notionComment(pageId, text) {
 async function syncDraftToNotion(lead, step, subject, bodyText) {
   await notionPatch(lead.notion_page_id, {
     'Drafted Message': { rich_text: [{ text: { content: `Subject: ${subject}\n\n${bodyText}`.slice(0, 1990) } }] },
+    Offer: { rich_text: [{ text: { content: OFFER_LABELS[lead.need_type] || OFFER_LABELS.website } }] },
   });
   await notionComment(
     lead.notion_page_id,
-    `[Automation] Touch ${step} drafted in Gmail on ${new Date().toLocaleDateString()}. Review and send from your Gmail Drafts folder — nothing goes out until you hit Send.`
+    `[Automation] Touch ${step} drafted in Gmail on ${new Date().toLocaleDateString()}. Tick "Approve" to have it sent on the next run (to change the wording, edit the Gmail draft). Nothing goes out until you approve.`
   );
 }
 
@@ -156,7 +191,7 @@ async function syncSentToNotion(lead, step) {
     'Outreach Step': { number: step },
     'Last Outreach': { date: { start: new Date().toISOString().slice(0, 10) } },
   });
-  await notionComment(lead.notion_page_id, `[Automation] Touch ${step} sent (detected via Gmail Drafts folder).`);
+  await notionComment(lead.notion_page_id, `[Automation] Touch ${step} sent.`);
 }
 
 // Shared by both the draft path (touch 1) and the auto-send path
@@ -173,7 +208,10 @@ function buildMessage(lead, nextStep) {
     context: lead.outreach_context ? `${lead.outreach_context} ` : '',
   };
   const subject = fillTemplate(touch.subject, vars);
-  const bodyText = fillTemplate(touch.body, vars);
+  // CAN-SPAM: opt-out line on every touch. The mailing address is private and
+  // only goes to businesses we pitch Wade Capital services to.
+  const addressLine = BUSINESS_NEED_TYPES.includes(lead.need_type) ? `${config.physical_address}\n` : '';
+  const bodyText = `${fillTemplate(touch.body, vars)}\n\n--\n${addressLine}Not interested? Reply "unsubscribe" and I won't email you again.`;
   const threadedSubject = nextStep > 1 ? `Re: ${subject}` : subject;
   const html = `
     <div style="font-family:sans-serif; font-size:15px; line-height:1.5; color:#1a1a1a;">
@@ -195,11 +233,14 @@ function trackingDecision(lead) {
   return { isTest, skipTracking, toAddress: skipTracking ? config.test_recipient_email : lead.email };
 }
 
-// A pending draft from a prior run: check whether it's still sitting
-// unreviewed, or gone (assumed sent — see file header).
+// A pending draft from a prior run: send it if approved in Notion, leave
+// it if not, or treat it as sent by hand if it's gone (see file header).
 async function checkPendingDraft(lead) {
-  const stillPending = await draftStillPending(lead.gmail_draft_id);
-  if (stillPending) return 'pending';
+  let sent = null;
+  if (await draftStillPending(lead.gmail_draft_id)) {
+    if (!(await notionApproved(lead.notion_page_id))) return 'pending';
+    sent = await sendDraft(lead.gmail_draft_id);
+  }
 
   const step = lead.sequence_step + 1; // the step that was drafted
   const isLastTouch = step === totalSteps();
@@ -209,9 +250,10 @@ async function checkPendingDraft(lead) {
     status: isLastTouch ? 'cold' : 'contacted',
     gmail_draft_id: null,
   };
+  if (sent?.threadId) updates.gmail_thread_id = sent.threadId;
   await supabase.from('leads').update(updates).eq('id', lead.id);
   await syncSentToNotion(lead, step);
-  return 'sent';
+  return sent ? 'approved' : 'sent';
 }
 
 // Touch 1 only: create a Gmail draft, don't send, wait for a human.
@@ -237,7 +279,7 @@ async function draftTouch(lead) {
 }
 
 // Touches 2-6 only: send immediately, no draft step. You already
-// reviewed and approved this lead once by sending touch 1 yourself.
+// approved this lead once at touch 1.
 async function sendFollowupTouch(lead) {
   const nextStep = lead.sequence_step + 1;
   const { threadedSubject, html } = buildMessage(lead, nextStep);
@@ -269,11 +311,16 @@ async function run() {
     console.log('outreach-sequencer: settings.outreach still has a placeholder sender_name — skipping run.');
     return;
   }
+  if (!config.physical_address || config.physical_address.startsWith('YOUR_')) {
+    console.log('outreach-sequencer: settings.outreach.physical_address is not set (required by CAN-SPAM) — skipping run.');
+    return;
+  }
 
   const leads = await fetchEligibleLeads();
 
   let checked = 0;
   let detectedSent = 0;
+  let approvedSent = 0;
   let newDrafts = 0;
   let followupsSent = 0;
 
@@ -286,6 +333,7 @@ async function run() {
         checked++;
         const outcome = await checkPendingDraft(lead);
         if (outcome === 'sent') detectedSent++;
+        if (outcome === 'approved') approvedSent++;
         continue;
       }
       if (!isDue(lead)) continue;
@@ -342,7 +390,7 @@ async function run() {
     console.log(`outreach-sequencer: ${skipped} lead(s) skipped due to errors this run — see log above for details.`);
   }
   console.log(
-    `outreach-sequencer: ${leads.length} eligible. ${checked} pending touch-1 draft(s) checked (${detectedSent} detected sent). ${newDrafts}/${config.max_new_drafts_per_run ?? 25} new touch-1 draft(s) created, ${followupsSent}/${config.max_followups_per_run ?? 30} follow-up(s) auto-sent this run.${config.test_mode ? ' [TEST MODE]' : ''}`
+    `outreach-sequencer: ${leads.length} eligible. ${checked} pending touch-1 draft(s) checked (${approvedSent} sent after Notion approval, ${detectedSent} sent by hand). ${newDrafts}/${config.max_new_drafts_per_run ?? 25} new touch-1 draft(s) created, ${followupsSent}/${config.max_followups_per_run ?? 30} follow-up(s) auto-sent this run.${config.test_mode ? ' [TEST MODE]' : ''}`
   );
 }
 
