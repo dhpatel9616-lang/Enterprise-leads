@@ -16,8 +16,10 @@
  *     which drops it out of fetchEligibleLeads) or opts out (an opt-out
  *     is a reply, so it stops the same way).
  *
- * Every touch carries a CAN-SPAM footer: settings.outreach.physical_address
- * plus an opt-out line. The run skips entirely until that address is set.
+ * Every touch carries an opt-out line. Business service pitches
+ * (BUSINESS_NEED_TYPES) also carry settings.outreach.physical_address, as
+ * CAN-SPAM requires; the address is private and never goes anywhere else.
+ * The run skips entirely until that address is set.
  *
  * If you don't want a drafted touch-1 to send, just leave "Approve"
  * unticked — the draft pauses that lead harmlessly.
@@ -62,6 +64,10 @@ const OFFER_PHRASES = {
   research_contact: 'GlobalAggregate as a research tool',
   governance_audit: 'the AI Governance Readiness Audit',
 };
+
+// Wade Capital service pitches to businesses — the only emails that carry
+// the mailing address (GlobalAggregate researcher/link outreach does not).
+const BUSINESS_NEED_TYPES = ['website', 'social', 'both', 'governance_audit'];
 
 // Short human label shown in Notion's "Offer" field so the approval view
 // says plainly what each draft is pitching.
@@ -202,8 +208,10 @@ function buildMessage(lead, nextStep) {
     context: lead.outreach_context ? `${lead.outreach_context} ` : '',
   };
   const subject = fillTemplate(touch.subject, vars);
-  // CAN-SPAM: every commercial email needs a physical address and a way to opt out.
-  const bodyText = `${fillTemplate(touch.body, vars)}\n\n--\n${config.physical_address}\nNot interested? Reply "unsubscribe" and I won't email you again.`;
+  // CAN-SPAM: opt-out line on every touch. The mailing address is private and
+  // only goes to businesses we pitch Wade Capital services to.
+  const addressLine = BUSINESS_NEED_TYPES.includes(lead.need_type) ? `${config.physical_address}\n` : '';
+  const bodyText = `${fillTemplate(touch.body, vars)}\n\n--\n${addressLine}Not interested? Reply "unsubscribe" and I won't email you again.`;
   const threadedSubject = nextStep > 1 ? `Re: ${subject}` : subject;
   const html = `
     <div style="font-family:sans-serif; font-size:15px; line-height:1.5; color:#1a1a1a;">
