@@ -85,6 +85,9 @@
     <label for="replyTo">Reply-to email</label>
     <input type="email" id="replyTo" />
 
+    <label for="physicalAddress">Mailing address (required by law in every outreach email; a PO box is fine)</label>
+    <input type="text" id="physicalAddress" />
+
     <label for="testRecipient">Test-mode recipient email</label>
     <input type="email" id="testRecipient" />
   </div>
@@ -153,6 +156,7 @@
     document.getElementById('testMode').checked = !!outreachConfig.test_mode;
     document.getElementById('senderName').value = outreachConfig.sender_name;
     document.getElementById('replyTo').value = outreachConfig.reply_to_email;
+    document.getElementById('physicalAddress').value = outreachConfig.physical_address || '';
     document.getElementById('testRecipient').value = outreachConfig.test_recipient_email;
 
     document.getElementById('digestTo').value = digestConfig.to_email;
@@ -193,6 +197,7 @@
       outreachConfig.test_mode = document.getElementById('testMode').checked;
       outreachConfig.sender_name = document.getElementById('senderName').value;
       outreachConfig.reply_to_email = document.getElementById('replyTo').value;
+      outreachConfig.physical_address = document.getElementById('physicalAddress').value;
       outreachConfig.test_recipient_email = document.getElementById('testRecipient').value;
 
       digestConfig.to_email = document.getElementById('digestTo').value;
