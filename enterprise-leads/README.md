@@ -45,8 +45,10 @@ shared thing is the Supabase *project* (not tables).
    Notion's **Outreach Approvals** view (Raw Leads Inbox). Tick
    **Approve** on your phone and the next run sends it. Follow-ups then
    go out on their own until the lead replies or opts out. Every email
-   ends with your mailing address and an opt-out line (CAN-SPAM); set
-   the address on the settings page or nothing sends.
+   ends with an opt-out line; Wade Capital service pitches to businesses
+   also carry your mailing address (CAN-SPAM). The address lives only in
+   the private `business_mailing_address` settings row, which the settings
+   page can't see; nothing sends until it's set.
 
 **Full loop, as built:** find leads across every location/category →
 classify what each one needs → email from you with a tailored pitch →
