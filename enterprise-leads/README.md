@@ -41,6 +41,12 @@ shared thing is the Supabase *project* (not tables).
    broken/missing sites, a social-focused pitch (no screenshot) for
    fine sites with no social presence, or both. Sent via your real
    Gmail account, threaded, synced to Notion.
+   **Touch 1 needs your OK:** it's saved as a Gmail draft and shown in
+   Notion's **Outreach Approvals** view (Raw Leads Inbox). Tick
+   **Approve** on your phone and the next run sends it. Follow-ups then
+   go out on their own until the lead replies or opts out. Every email
+   ends with your mailing address and an opt-out line (CAN-SPAM); set
+   the address on the settings page or nothing sends.
 
 **Full loop, as built:** find leads across every location/category →
 classify what each one needs → email from you with a tailored pitch →
