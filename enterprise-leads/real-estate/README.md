@@ -11,6 +11,8 @@ Market #1 is **Baltimore City**. It had the most mortgage defaults in Maryland i
 | `re_properties` | Likely motivated sellers: open vacancy notice and/or a foreclosure filing in the last 18 months, with the owner's name and mailing address | +4 foreclosure in 12 months (+3 if 12 to 18), +3 vacant notice (+1 if 2+ years old), +2 absentee owner, +1 individual (not a company), +1 owned 10+ years, +2 vacant AND in foreclosure |
 | `re_buyers` | Cash-buyer investors: companies that bought 2+ Baltimore properties for $10k to $400k in the last 24 months | Most purchases in the last 12 months first |
 
+**Data note (Sept 2026):** the city's foreclosure-filings layer stops at December 2020, so in practice the list is driven by vacancy notices plus owner signals. A current foreclosure feed (Maryland court filings or Prince George's County) is the next source to add.
+
 Properties owned by the city, banks, or government agencies are skipped, since you can't buy those from the owner directly. The pipeline **never contacts anyone**. It only builds the lists. `status` and `notes` on each row are yours to edit, and the weekly run never overwrites them.
 
 ## Maryland rules (not legal advice; confirm with a Maryland real estate attorney before your first contract)

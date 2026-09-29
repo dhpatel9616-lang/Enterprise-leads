@@ -102,6 +102,29 @@ async function fetchAll(layerId, outFields, where = "1=1") {
   return rows;
 }
 
+// One query, no paging. Returns { rows, hitLimit } — hitLimit means the
+// server's 1,000-row cap was reached and the slice should be narrower.
+async function fetchWhere(layerId, outFields, where) {
+  const params = new URLSearchParams({ where, outFields: outFields.join(","), returnGeometry: "false", f: "json" });
+  const url = `${BASE}/${layerId}/query`;
+  // POST keeps long IN (...) lists safely under URL length limits.
+  let data;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetch(url, { method: "POST", body: params, signal: AbortSignal.timeout(60000), headers: { "User-Agent": "WadeCapital-research/1.0" } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json();
+      if (data.error) throw new Error(JSON.stringify(data.error));
+      break;
+    } catch (err) {
+      if (attempt >= 4) throw new Error(`layer ${layerId} query failed: ${err.message}`);
+      await new Promise((r) => setTimeout(r, attempt * 3000));
+    }
+  }
+  const rows = (data.features || []).map((f) => f.attributes);
+  return { rows, hitLimit: Boolean(data.exceededTransferLimit) || rows.length >= 1000 };
+}
+
 // ---------- normalizing ----------
 
 const clean = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
@@ -147,12 +170,41 @@ async function main() {
     console.log("  NOTE: the city's foreclosure layer looks stale (newest filing is 4+ months old). Vacancy notices still drive the list.");
   }
 
-  console.log("baltimore-pull: fetching every property record (takes a few minutes)...");
-  const parcels = await fetchAll(LAYER.property, [
-    "BLOCKLOT", "FULLADDR", "ZIP_CODE", "NEIGHBOR", "OWNER_1", "OWNER_2", "MAILTOADD",
-    "SALEDATE", "SALEPRIC", "FULLCASH", "YEAR_BUILD", "DWELUNIT", "NO_IMPRV",
-  ]);
-  console.log(`  ${parcels.length} parcels`);
+  // The property layer can't be paged straight through, so look up only
+  // the parcels we need: (1) the flagged properties, by parcel ID in
+  // batches, and (2) recent sales, one month at a time, for the buyers list.
+  const PARCEL_FIELDS = ["BLOCKLOT", "FULLADDR", "ZIP_CODE", "NEIGHBOR", "OWNER_1", "OWNER_2", "MAILTOADD", "SALEDATE", "SALEPRIC", "FULLCASH", "YEAR_BUILD", "DWELUNIT", "NO_IMPRV"];
+  const wanted = [...new Set([...vacants.map((v) => clean(v.BLOCKLOT)), ...foreclosures.filter((f) => f.Date && NOW - f.Date <= 548 * DAY).map((f) => clean(f.BLOCKLOT))].filter(Boolean))];
+  console.log(`baltimore-pull: looking up ${wanted.length} flagged parcels...`);
+  const parcels = [];
+  for (let i = 0; i < wanted.length; i += 100) {
+    const list = wanted.slice(i, i + 100).map((b) => `'${b.replace(/'/g, "''")}'`).join(",");
+    const { rows } = await fetchWhere(LAYER.property, PARCEL_FIELDS, `BLOCKLOT IN (${list})`);
+    parcels.push(...rows);
+    if ((i / 100) % 20 === 19) console.log(`  ${parcels.length} parcels so far...`);
+  }
+  diag.flaggedParcelsFound = parcels.length;
+
+  console.log("baltimore-pull: pulling the last 24 months of sales for the buyers list...");
+  const salesRows = [];
+  const cappedMonths = [];
+  for (let back = 0; back < 25; back++) {
+    const d = new Date(NOW);
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() - back);
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const yyyy = d.getUTCFullYear();
+    const { rows, hitLimit } = await fetchWhere(
+      LAYER.property,
+      PARCEL_FIELDS,
+      `SALEPRIC >= 10000 AND SALEPRIC <= 400000 AND (SALEDATE LIKE '${mm}__${yyyy}' OR SALEDATE LIKE '${yyyy}${mm}__')`
+    );
+    salesRows.push(...rows);
+    if (hitLimit) cappedMonths.push(`${yyyy}-${mm}`);
+  }
+  diag.salesRows = salesRows.length;
+  diag.cappedMonths = cappedMonths;
+  console.log(`  ${salesRows.length} sales rows${cappedMonths.length ? ` (months at the 1,000-row cap: ${cappedMonths.join(", ")})` : ""}`);
 
   const parcelByBL = new Map();
   for (const p of parcels) if (p.BLOCKLOT) parcelByBL.set(blocklotKey(p.BLOCKLOT), p);
@@ -261,7 +313,7 @@ async function main() {
 
   // ----- cash-buyer list -----
   const buyersMap = new Map();
-  for (const p of parcels) {
+  for (const p of salesRows) {
     const owner = clean(p.OWNER_1);
     const ownerAll = norm(`${p.OWNER_1 || ""} ${p.OWNER_2 || ""}`);
     if (!owner || !ENTITY.test(ownerAll) || INSTITUTION.test(ownerAll)) continue;
@@ -271,8 +323,12 @@ async function main() {
     if (!Number.isFinite(price) || price < 10000 || price > 400000) continue; // investor price band
     const key = norm(owner).replace(/\b(LLC|INC|L L C|CORP|THE)\b/g, "").replace(/\s+/g, " ").trim();
     if (!key) continue;
-    if (!buyersMap.has(key)) buyersMap.set(key, { owner, mailing: clean(p.MAILTOADD), buys: [] });
-    buyersMap.get(key).buys.push({ date: d, price, addr: clean(p.FULLADDR) });
+    if (!buyersMap.has(key)) buyersMap.set(key, { owner, mailing: clean(p.MAILTOADD), buys: [], seen: new Set() });
+    const b = buyersMap.get(key);
+    const bl = blocklotKey(p.BLOCKLOT);
+    if (b.seen.has(bl)) continue;
+    b.seen.add(bl);
+    b.buys.push({ date: d, price, addr: clean(p.FULLADDR) });
   }
   const buyers = [];
   for (const [key, b] of buyersMap) {
@@ -296,7 +352,7 @@ async function main() {
 
   // ----- report -----
   console.log(`\nbaltimore-pull: ${properties.length} motivated-seller properties (skipped ${skippedInstitutional} owned by the city, banks, or agencies).`);
-  console.log(`  score >= 8: ${properties.filter((p) => p.score >= 8).length} | score 6-7: ${properties.filter((p) => p.score >= 6 && p.score < 8).length}`);
+  console.log(`  score 6+: ${properties.filter((p) => p.score >= 6).length} | score 4-5: ${properties.filter((p) => p.score >= 4 && p.score < 6).length}`);
   console.log(`  with foreclosure filing: ${properties.filter((p) => p.foreclosure_filing_date).length} | vacant: ${properties.filter((p) => p.vacant_notice_date).length}`);
   console.log("  top 10:");
   for (const p of properties.slice(0, 10)) console.log(`    [${p.score}] ${p.address} | owner ${p.owner_1} | ${p.signals.join(", ")}`);
@@ -318,7 +374,7 @@ async function main() {
     const { error } = await supabase.from("re_buyers").upsert(buyers.slice(i, i + 500), { onConflict: "owner_key" });
     if (error) throw new Error(`re_buyers upsert failed: ${error.message}`);
   }
-  const summary = `vacancy notices ${vacants.length}, foreclosure filings ${foreclosures.length} (newest ${fcDates[0] ? toISODate(fcDates[0]) : "none"}), parcels ${parcels.length}, parcel matches ${properties.filter((p) => p.owner_1).length}; saved ${properties.length} properties (${properties.filter((p) => p.score >= 8).length} scoring 8+) and ${buyers.length} buyers`;
+  const summary = `vacancy notices ${vacants.length}, foreclosure filings ${foreclosures.length} (newest ${fcDates[0] ? toISODate(fcDates[0]) : "none"}), flagged parcels found ${parcels.length}, sales rows ${salesRows.length}, parcel matches ${properties.filter((p) => p.owner_1).length}; saved ${properties.length} properties (${properties.filter((p) => p.score >= 6).length} scoring 6+) and ${buyers.length} buyers`;
   console.log(`\nbaltimore-pull: ${summary}`);
   await saveRunLog(summary);
 }
