@@ -1,5 +1,16 @@
 # Enterprise Leads
 
+> **Outreach v2 (Sept 2026): what changed**
+> - **Emails send automatically.** The "draft, then you send it" step is gone. An old draft that is still sitting in Gmail was never sent, so it is deleted and replaced with the new email. If you already sent it, the lead just moves forward. Nobody gets two copies.
+> - **Bad addresses are blocked before sending.** Template placeholders (user@domain.com, hi@mystore.com) and domains with no mail server are rejected (`ingest/lib/email-quality.js`).
+> - **Bounces are no longer counted as replies.** `check-replies.js` sorts each response into reply, bounce, unsubscribe, or auto-reply (`reply_kind` column). Old misclassified leads fix themselves on the first run.
+> - **Every email carries an opt-out line, and service pitches carry the mailing address** (U.S. CAN-SPAM law). The address lives only in the private `business_mailing_address` settings row; nothing sends until it is set.
+> - **Notion approval is optional.** Set `require_notion_approval: true` in the outreach settings to make first emails wait for the Approve checkbox. It's off by default.
+> - **The database is locked to the service key.** The public key can't read or write anything (`supabase/migrations/20260929140000_lockdown_public_access.sql`).
+> - **The daily digest has a call list and a replies section.** It lists 15 businesses a day that have a phone number but no working email, rotating every 14 days. Businesses with no website come first, each with a link to a free mockup site (`preview.html` on the Wade Capital site).
+> - **Lead sourcing covers 11 metro areas** (PA, MD, VA, DC) with a hard monthly cap of 950 Google searches, which stays inside Google's free tier.
+> - Settings changes are recorded in `supabase/outreach-v2-settings.sql`.
+
 Sources local business leads (missing/broken websites = website-studio
 outreach targets) via Google Places, writes them into Notion's **Raw
 Leads Inbox**, sends outreach from your **real Gmail account**, and
@@ -41,14 +52,12 @@ shared thing is the Supabase *project* (not tables).
    broken/missing sites, a social-focused pitch (no screenshot) for
    fine sites with no social presence, or both. Sent via your real
    Gmail account, threaded, synced to Notion.
-   **Touch 1 needs your OK:** it's saved as a Gmail draft and shown in
-   Notion's **Outreach Approvals** view (Raw Leads Inbox). Tick
-   **Approve** on your phone and the next run sends it. Follow-ups then
-   go out on their own until the lead replies or opts out. Every email
-   ends with an opt-out line; Wade Capital service pitches to businesses
-   also carry your mailing address (CAN-SPAM). The address lives only in
-   the private `business_mailing_address` settings row, which the settings
-   page can't see; nothing sends until it's set.
+   **Touch 1 sends automatically** (Outreach v2). Turn on
+   `require_notion_approval` to make it wait for Notion's **Approve**
+   checkbox instead. Every email ends with an opt-out line; Wade Capital
+   service pitches also carry your mailing address (CAN-SPAM), read from
+   the private `business_mailing_address` settings row. Nothing sends
+   until it's set.
 
 **Full loop, as built:** find leads across every location/category →
 classify what each one needs → email from you with a tailored pitch →

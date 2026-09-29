@@ -40,21 +40,58 @@ function base64url(str) {
     .replace(/=+$/, '');
 }
 
-function buildRawMessage({ to, subject, html, replyTo }) {
-  const headers = [`To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0', 'Content-Type: text/html; charset=UTF-8'];
+// Non-ASCII subjects/names (e.g. "Engel & Völkers") must be encoded
+// per RFC 2047 or some mail servers mangle them.
+function encodeHeader(value) {
+  return /^[\x20-\x7e]*$/.test(value) ? value : `=?UTF-8?B?${Buffer.from(value, 'utf-8').toString('base64')}?=`;
+}
+
+// Builds the raw email. Cold outreach goes out as PLAIN TEXT with a
+// minimal HTML twin (multipart/alternative) — plain, personal-looking
+// email lands in the inbox far more often than designed HTML email.
+// Pass `text` for that. Passing only `html` keeps the old behavior.
+function buildRawMessage({ to, subject, html, text, replyTo, fromName, fromEmail }) {
+  const headers = [`To: ${to}`, `Subject: ${encodeHeader(subject)}`, 'MIME-Version: 1.0'];
+  if (fromName && fromEmail) headers.unshift(`From: ${encodeHeader(fromName)} <${fromEmail}>`);
   if (replyTo) headers.push(`Reply-To: ${replyTo}`);
-  return base64url(`${headers.join('\r\n')}\r\n\r\n${html}`);
+
+  if (!text) {
+    headers.push('Content-Type: text/html; charset=UTF-8');
+    return base64url(`${headers.join('\r\n')}\r\n\r\n${html}`);
+  }
+
+  const boundary = `wc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const htmlPart =
+    html ||
+    `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#222;">${text
+      .split('\n')
+      .map((line) => line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/(https?:\/\/\S+)/g, '<a href="$1">$1</a>') || '&nbsp;')
+      .join('<br>')}</div>`;
+  headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+  const body = [
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    text,
+    `--${boundary}`,
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    htmlPart,
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
+  return base64url(`${headers.join('\r\n')}\r\n\r\n${body}`);
 }
 
 // Sends an email as the authenticated Gmail account immediately. Pass
 // threadId to keep a follow-up grouped in the same Gmail conversation as
 // earlier touches. Returns { id, threadId } — save threadId to track
-// this lead's conversation for reply-detection. Kept for check-replies.js
-// and any script that genuinely wants an immediate send (not used by
-// outreach-sequencer.js anymore — that creates drafts instead, see below).
-async function sendGmail({ to, subject, html, replyTo, threadId }) {
+// this lead's conversation for reply-detection.
+async function sendGmail({ to, subject, html, text, replyTo, threadId, fromName, fromEmail }) {
   const accessToken = await getAccessToken();
-  const raw = buildRawMessage({ to, subject, html, replyTo });
+  const raw = buildRawMessage({ to, subject, html, text, replyTo, fromName, fromEmail });
   const body = { raw };
   if (threadId) body.threadId = threadId;
 
@@ -72,9 +109,9 @@ async function sendGmail({ to, subject, html, replyTo, threadId }) {
 // Drafts folder until a human reviews and sends it. Returns
 // { id, message: { id, threadId } }. Save the returned draft `id` so a
 // later run can check draftStillPending() to detect whether it was sent.
-async function createDraft({ to, subject, html, replyTo, threadId }) {
+async function createDraft({ to, subject, html, text, replyTo, threadId, fromName, fromEmail }) {
   const accessToken = await getAccessToken();
-  const raw = buildRawMessage({ to, subject, html, replyTo });
+  const raw = buildRawMessage({ to, subject, html, text, replyTo, fromName, fromEmail });
   const message = { raw };
   if (threadId) message.threadId = threadId;
 
@@ -107,20 +144,6 @@ async function draftStillPending(draftId) {
   return true;
 }
 
-// Sends an existing draft exactly as it sits in the Drafts folder (including
-// any edits made to it in Gmail). Returns the sent message { id, threadId }.
-async function sendDraft(draftId) {
-  const accessToken = await getAccessToken();
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: draftId }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`Gmail draft send failed: ${JSON.stringify(data)}`);
-  return data;
-}
-
 // The Gmail address the automation is authorized as — used by
 // check-replies.js to tell "a reply came in" apart from "this is one
 // of our own sent messages."
@@ -134,15 +157,50 @@ async function getOwnEmailAddress() {
   return data.emailAddress;
 }
 
+// Sends an EXISTING draft exactly as it was written. Used to clear out
+// touch-1 drafts left over from the old "draft, then a human sends it"
+// flow: if a draft is still sitting there, sending that same draft
+// (instead of composing a fresh email) guarantees nobody gets two copies.
+// Returns { id, threadId } of the sent message.
+async function sendDraft(draftId) {
+  const accessToken = await getAccessToken();
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: draftId }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Gmail draft send failed: ${JSON.stringify(data)}`);
+  return data;
+}
+
+// Deletes a draft. A 404 means it's already gone, which is fine.
+async function deleteDraft(draftId) {
+  const accessToken = await getAccessToken();
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(`Gmail draft delete failed: ${JSON.stringify(data)}`);
+  }
+}
+
+// Returns every message in a thread with From + Subject headers, the
+// label list (DRAFT / SENT / INBOX), and Gmail's short text snippet —
+// enough for check-replies.js to tell a real reply apart from a bounce
+// notice, an out-of-office auto-reply, or an unsubscribe request.
 async function getThreadMessages(threadId) {
   const accessToken = await getAccessToken();
   const res = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=From`,
+    `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Auto-Submitted`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   const data = await res.json();
+  if (res.status === 404) return [];
   if (!res.ok) throw new Error(`Gmail thread fetch failed: ${JSON.stringify(data)}`);
   return data.messages || [];
 }
 
-module.exports = { sendGmail, createDraft, draftStillPending, sendDraft, getOwnEmailAddress, getThreadMessages };
+module.exports = { sendGmail, createDraft, sendDraft, deleteDraft, draftStillPending, getOwnEmailAddress, getThreadMessages };

@@ -1,16 +1,25 @@
 /**
- * Checks every actively-sequenced lead's Gmail thread for a reply.
- * Run BEFORE outreach-sequencer.js in the daily schedule, so a reply
- * that came in overnight pauses that lead's sequence before today's
- * touch would otherwise fire.
+ * Checks every emailed lead's Gmail thread and sorts what came back.
+ * Runs BEFORE outreach-sequencer.js each weekday, so anything that came
+ * in overnight stops that lead's sequence before the next email fires.
  *
- * A lead is "replied" if its Gmail thread contains any message NOT
- * sent from your own address — good enough for a single-user setup
- * where you're the only one sending from that account.
+ * The old version treated ANY incoming message as "replied" — including
+ * "Delivery Status Notification (Failure)" bounces, which is why most of
+ * the leads marked `replied` were actually dead addresses. Each message
+ * that isn't ours is now classified:
+ *
+ *   bounce       → status 'bounced'      (address is dead; lead moves to
+ *                                          the call list in the digest)
+ *   unsubscribe  → status 'unsubscribed' (never emailed again)
+ *   auto-reply   → ignored ("out of office" is not a conversation)
+ *   anything else→ status 'replied'      (a human wrote back — go read it)
+ *
+ * `reply_kind` records which one it was. Leads already marked 'replied'
+ * by the old logic with no reply_kind get re-checked once automatically,
+ * so the old misclassifications fix themselves.
  *
  * Requires SUPABASE_URL, SUPABASE_SERVICE_KEY, GMAIL_CLIENT_ID,
- * GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN. No-ops safely if any are
- * missing.
+ * GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN. No-ops safely if missing.
  */
 const { createClient } = require('@supabase/supabase-js');
 const { getOwnEmailAddress, getThreadMessages } = require('./lib/gmail');
@@ -27,76 +36,133 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !process.env.GMAIL_CLIENT_ID || !p
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-function fromHeader(message) {
-  return (message.payload?.headers || []).find((h) => h.name === 'From')?.value || '';
+const BOUNCE_FROM = /mailer-daemon|postmaster|mail delivery (subsystem|system)|microsoftexchange|bounce/i;
+const BOUNCE_SUBJECT = /delivery status notification|undeliver|delivery (has )?failed|failure notice|returned mail|could not be delivered|mail delivery failed|delivery incomplete|message not delivered|address not found/i;
+const AUTO_SUBJECT = /out of (the )?office|automatic reply|auto(matic)?[- ]?reply|autoreply|away from (my|the) (desk|office)|on vacation|thank you for (your email|contacting|reaching out)|we (have )?received your (message|email)/i;
+const UNSUB_TEXT = /\bunsubscribe\b|remove me|take me off|stop (emailing|contacting)|do not (email|contact)|don'?t (email|contact)|not interested|no thanks|no thank you/i;
+
+function header(message, name) {
+  return (message.payload?.headers || []).find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || '';
 }
 
-async function threadHasReply(threadId, ownEmail) {
+function classify(message) {
+  const from = header(message, 'From');
+  const subject = header(message, 'Subject');
+  const autoSubmitted = header(message, 'Auto-Submitted');
+  const snippet = message.snippet || '';
+  if (BOUNCE_FROM.test(from) || BOUNCE_SUBJECT.test(subject)) return 'bounce';
+  if (UNSUB_TEXT.test(snippet) || UNSUB_TEXT.test(subject)) return 'unsubscribe';
+  if ((autoSubmitted && autoSubmitted.toLowerCase() !== 'no') || AUTO_SUBJECT.test(subject)) return 'auto';
+  return 'reply';
+}
+
+// Strongest signal wins: a human reply beats an auto-reply, etc.
+const RANK = { reply: 4, unsubscribe: 3, bounce: 2, auto: 1 };
+
+async function inspectThread(threadId, ownEmail) {
   const messages = await getThreadMessages(threadId);
-  return messages.some((m) => !fromHeader(m).toLowerCase().includes(ownEmail.toLowerCase()));
+  let best = null;
+  for (const m of messages) {
+    if ((m.labelIds || []).includes('DRAFT')) continue;
+    if (header(m, 'From').toLowerCase().includes(ownEmail.toLowerCase())) continue;
+    const kind = classify(m);
+    if (!best || RANK[kind] > RANK[best]) best = kind;
+  }
+  return best; // null = nothing came back
 }
 
-// Appends a note to the lead's Raw Notes in Notion so the reply is
-// visible there too, not just inferred from a frozen Outreach Step.
-async function noteReplyInNotion(lead) {
+async function noteInNotion(lead, text) {
   if (!NOTION_TOKEN || !lead.notion_page_id) return;
-  const getRes = await fetch(`https://api.notion.com/v1/pages/${lead.notion_page_id}`, {
-    headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION },
-  });
-  const page = await getRes.json();
-  const currentNotes = page.properties?.['Raw Notes']?.rich_text?.[0]?.plain_text || '';
-  const updatedNotes = `${currentNotes}\n\n✅ Replied on ${new Date().toISOString().slice(0, 10)} — outreach sequence paused.`;
-
-  await fetch(`https://api.notion.com/v1/pages/${lead.notion_page_id}`, {
-    method: 'PATCH',
-    headers: {
-      Authorization: `Bearer ${NOTION_TOKEN}`,
-      'Notion-Version': NOTION_VERSION,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ properties: { 'Raw Notes': { rich_text: [{ text: { content: updatedNotes.slice(0, 2000) } }] } } }),
-  });
+  try {
+    const getRes = await fetch(`https://api.notion.com/v1/pages/${lead.notion_page_id}`, {
+      headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION },
+    });
+    const page = await getRes.json();
+    const currentNotes = page.properties?.['Raw Notes']?.rich_text?.[0]?.plain_text || '';
+    await fetch(`https://api.notion.com/v1/pages/${lead.notion_page_id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ properties: { 'Raw Notes': { rich_text: [{ text: { content: `${currentNotes}\n\n${text}`.slice(0, 2000) } }] } } }),
+    });
+  } catch (err) {
+    console.error(`check-replies: Notion note failed for ${lead.business_name}: ${err.message}`);
+  }
 }
+
+const OUTCOME = {
+  reply: { status: 'replied', note: '✅ REPLIED — sequence paused. Read it in Gmail.' },
+  unsubscribe: { status: 'unsubscribed', note: '⛔ Asked not to be contacted — never email again.' },
+  bounce: { status: 'bounced', note: '↩️ Email bounced — address is dead. Moved to the call list.' },
+};
 
 async function run() {
-  const { data: leads, error } = await supabase
+  const { data: active, error } = await supabase
     .from('leads')
     .select('*')
-    .in('status', ['new', 'contacted'])
+    .in('status', ['new', 'contacted', 'cold'])
     .not('gmail_thread_id', 'is', null);
   if (error) throw error;
 
-  if (!leads || leads.length === 0) {
+  // One-time self-repair: leads the OLD logic marked 'replied' (which
+  // counted bounces as replies) get re-checked with the new rules.
+  const { data: legacy, error: legacyErr } = await supabase
+    .from('leads')
+    .select('*')
+    .eq('status', 'replied')
+    .is('reply_kind', null)
+    .not('gmail_thread_id', 'is', null);
+  if (legacyErr) throw legacyErr;
+
+  const leads = [...(active || []), ...(legacy || [])];
+  if (leads.length === 0) {
     console.log('check-replies: no leads with an active thread yet.');
     return;
   }
 
   const ownEmail = await getOwnEmailAddress();
-  let repliedCount = 0;
+  const tally = { reply: 0, unsubscribe: 0, bounce: 0, auto: 0, restored: 0 };
 
   for (const lead of leads) {
     try {
-      const replied = await threadHasReply(lead.gmail_thread_id, ownEmail);
-      if (replied) {
-        // A reply proves touch 1 (or whichever touch was last drafted) was
-        // actually sent — clear the stale pending-draft marker and advance
-        // the step so this lead's record doesn't look frozen at step 0.
-        await supabase.from('leads').update({
-          status: 'replied',
-          gmail_draft_id: null,
-          sequence_step: Math.max(lead.sequence_step, 1),
-          last_contacted: lead.last_contacted || new Date().toISOString(),
-        }).eq('id', lead.id);
-        await noteReplyInNotion(lead);
-        repliedCount++;
-        console.log(`check-replies: ${lead.business_name} replied — sequence paused.`);
+      const kind = await inspectThread(lead.gmail_thread_id, ownEmail);
+      const isLegacy = lead.status === 'replied';
+
+      if (!kind || kind === 'auto') {
+        if (kind) tally.auto++;
+        if (isLegacy) {
+          // Marked "replied" before, but nothing real is in the thread —
+          // put it back in the sequence where it left off.
+          await supabase.from('leads').update({ status: 'contacted', reply_kind: kind || 'none' }).eq('id', lead.id);
+          tally.restored++;
+        }
+        continue;
       }
+
+      const outcome = OUTCOME[kind];
+      if (lead.status === outcome.status && lead.reply_kind === kind) continue;
+
+      const { error: upErr } = await supabase.from('leads').update({
+        status: outcome.status,
+        reply_kind: kind,
+        replied_at: new Date().toISOString(),
+        gmail_draft_id: null,
+        sequence_step: Math.max(lead.sequence_step, 1),
+        last_contacted: lead.last_contacted || new Date().toISOString(),
+      }).eq('id', lead.id);
+      if (upErr) throw new Error(upErr.message);
+
+      await noteInNotion(lead, `${outcome.note} (${new Date().toISOString().slice(0, 10)})`);
+      tally[kind]++;
+      console.log(`check-replies: ${lead.business_name} → ${kind}`);
     } catch (err) {
-      console.error(`check-replies: failed checking ${lead.business_name}:`, err.message);
+      console.error(`check-replies: failed checking ${lead.business_name}: ${err.message}`);
     }
   }
 
-  console.log(`check-replies: checked ${leads.length} active leads, ${repliedCount} new replies found.`);
+  console.log(
+    `check-replies: checked ${leads.length} threads. Real replies: ${tally.reply}. Unsubscribes: ${tally.unsubscribe}. ` +
+      `Bounces: ${tally.bounce}. Auto-replies ignored: ${tally.auto}. Old "replied" leads put back in sequence: ${tally.restored}.`
+  );
 }
 
 run().catch((err) => {

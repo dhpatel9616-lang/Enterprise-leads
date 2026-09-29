@@ -1,0 +1,27 @@
+name: Real Estate — Baltimore City Lists
+
+# Weekly: rebuilds the Baltimore motivated-seller list (re_properties)
+# and cash-buyer list (re_buyers) from the city's free open data.
+# It only builds lists — it never contacts anyone.
+on:
+  schedule:
+    - cron: '23 13 * * 0' # ~9:23am ET every Sunday (off the round minute to avoid cron congestion)
+  workflow_dispatch: {}
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: "enterprise-leads"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run re-baltimore
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

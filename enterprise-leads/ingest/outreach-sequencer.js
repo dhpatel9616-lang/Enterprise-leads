@@ -1,79 +1,85 @@
 /**
- * Reads leads from the Supabase `leads` table and manages a hybrid
- * outreach cycle:
+ * Sends outreach to leads in the Supabase `leads` table, fully
+ * automatically, with guard rails.
  *
- *   - TOUCH 1 (first contact with a new lead) is always drafted, never
- *     auto-sent without approval. A Gmail DRAFT gets created and synced to
- *     Notion's "Drafted Message" + "Offer" fields (see the "Outreach
- *     Approvals" view). On a later run, if the lead's "Approve" checkbox
- *     is ticked in Notion, the script sends that exact Gmail draft. You can
- *     also still send it by hand from Gmail; a draft that's gone is
- *     assumed sent (Gmail can't tell "you sent it" apart from "you
- *     deleted it").
- *   - TOUCHES 2-6 (follow-ups) auto-send once due, no draft step. You
- *     approved this lead once at touch 1, so follow-ups go out on their
- *     own until the lead replies (check-replies.js sets status 'replied',
- *     which drops it out of fetchEligibleLeads) or opts out (an opt-out
- *     is a reply, so it stops the same way).
+ * What changed (Sept 2026): touch 1 used to be saved as a Gmail DRAFT
+ * for a human to send. That step is gone — every touch now sends on its
+ * own, within daily caps. Safety checks run right before each send:
  *
- * Every touch carries an opt-out line. Business service pitches
- * (BUSINESS_NEED_TYPES) also carry the mailing address from the private
- * `business_mailing_address` settings row (a JSON string), as CAN-SPAM
- * requires. It is never hard-coded and never goes anywhere but those emails;
- * RLS hides that row from the anon key, so only this service-key job reads it.
- * The run skips entirely until that address is set.
+ *   1. Email check (lib/email-quality.js): placeholder addresses and
+ *      domains with no mail server are never sent to.
+ *   2. Leftover drafts from the old flow: if a touch-1 draft still
+ *      exists it was never sent, so it is deleted and replaced by the
+ *      new email (the old copy lacks the required footer). If the
+ *      draft is gone, it was already sent by hand, so the lead just
+ *      moves forward. Either way nobody gets the same email twice.
+ *   3. Daily caps: `max_new_sends_per_run` (first emails) and
+ *      `max_followups_per_run` keep one free Gmail inbox inside volumes
+ *      that don't trip spam filters.
+ *   4. Legal footer: every email carries an opt-out line, and Wade
+ *      Capital service pitches (BUSINESS_NEED_TYPES) also carry the
+ *      mailing address (U.S. CAN-SPAM Act). The address lives only in the
+ *      private `business_mailing_address` settings row (a JSON string),
+ *      never in this public repo. If it isn't set, NOTHING sends.
+ *   5. Optional approval gate: set `require_notion_approval: true` in
+ *      settings.outreach and first emails wait until the lead's
+ *      "Approve" checkbox is ticked in Notion (the email preview is
+ *      written to its "Drafted Message" field). Off by default.
  *
- * If you don't want a drafted touch-1 to send, just leave "Approve"
- * unticked — the draft pauses that lead harmlessly.
- *
- * Touch 1 differs by need_type (settings.outreach.touch_sets).
- * Touches 2+ are shared copy (settings.outreach.followups) with an
- * {offer_phrase} placeholder that still reflects the right offer —
- * EXCEPT for website/social/both leads from touch 3 onward, which pivot
- * to the Automation Readiness Audit pitch (settings.outreach.automation_pivot)
- * once they've gone quiet on the initial menu pitch. See touchForStep().
+ * Which email a lead gets:
+ *   - touch 1 is picked by need_type (settings.outreach.touch_sets).
+ *     Leads with NO website get `touch_sets.no_website` when a
+ *     `preview_base_url` is set — that email links to a free mockup of
+ *     a site for their business (see preview.html on the Wade Capital
+ *     site). Otherwise they get the regular `website` touch.
+ *   - touches 2+ are shared follow-ups (settings.outreach.followups),
+ *     except website/social/both leads switch to the Automation
+ *     Readiness Audit pitch (settings.outreach.automation_pivot) from
+ *     `start_step` on.
  *
  * Requires SUPABASE_URL, SUPABASE_SERVICE_KEY, GMAIL_CLIENT_ID,
- * GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN. No-ops safely if any are
- * missing.
+ * GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN. No-ops safely if missing.
+ * Run with DRY_RUN=1 to print what WOULD send without sending anything.
  */
 const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
-const { createDraft, draftStillPending, sendDraft, sendGmail } = require('./lib/gmail');
+const { sendGmail, deleteDraft, draftStillPending } = require('./lib/gmail');
+const { checkSendable } = require('./lib/email-quality');
+const { previewUrl: buildPreviewUrl } = require('./lib/preview');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const NOTION_VERSION = '2022-06-28';
+const DRY_RUN = process.env.DRY_RUN === '1';
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_REFRESH_TOKEN) {
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || (!DRY_RUN && (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_REFRESH_TOKEN))) {
   console.log('outreach-sequencer: one or more required secrets are missing. Skipping run.');
   process.exit(0);
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 let config;
-let mailingAddress; // private: business outreach emails only
+let mailingAddress; // private: from the business_mailing_address settings row
 
 function fillTemplate(str, vars) {
   return str.replace(/\{(\w+)\}/g, (_, key) => vars[key] ?? '');
 }
 
 const OFFER_PHRASES = {
-  website: 'the tech and strategy support we offer',
-  social: 'the tech and strategy support we offer',
-  both: 'the tech and strategy support we offer',
+  website: 'a website refresh',
+  social: 'automated social media posting',
+  both: 'a website refresh and automated social posting',
   reciprocal_link: 'a reciprocal link',
   research_contact: 'GlobalAggregate as a research tool',
   governance_audit: 'the AI Governance Readiness Audit',
 };
 
-// Wade Capital service pitches to businesses — the only emails that carry
+// Wade Capital service pitches to businesses: the only emails that carry
 // the mailing address (GlobalAggregate researcher/link outreach does not).
 const BUSINESS_NEED_TYPES = ['website', 'social', 'both', 'governance_audit'];
 
-// Short human label shown in Notion's "Offer" field so the approval view
-// says plainly what each draft is pitching.
+// Short label for Notion's "Offer" field.
 const OFFER_LABELS = {
   website: 'Website studio',
   social: 'Social media management',
@@ -84,36 +90,37 @@ const OFFER_LABELS = {
 };
 
 function issueLine(lead) {
-  if (lead.need_type === 'social') return "doesn't have an active social media presence I could find";
-  if (lead.need_type === 'both') return "doesn't currently have a working website or an active social media presence I could find";
-  if (!lead.site_url) return "doesn't currently have a website";
-  if (!lead.mobile_ok) return "doesn't render well on mobile";
-  if (!lead.has_ssl) return "isn't running on a secure connection (no SSL)";
+  if (lead.need_type === 'social') return "doesn't link to any social media accounts";
+  if (!lead.site_url) return "doesn't seem to have a website";
+  if (!lead.mobile_ok && !lead.has_ssl) return "doesn't adjust for phones and shows a \"not secure\" warning in some browsers";
+  if (!lead.mobile_ok) return "doesn't adjust for phone screens";
+  if (!lead.has_ssl) return "shows a \"not secure\" warning in some browsers (no SSL certificate)";
+  if (lead.need_type === 'both') return "doesn't link to any social media accounts";
   return 'could use a refresh';
 }
 
+function previewUrl(lead) {
+  return buildPreviewUrl(lead, config.preview_base_url);
+}
+
 function totalSteps() {
-  return 1 + config.followups.length; // touch 1 (need-specific) + shared followups
+  return 1 + config.followups.length;
 }
 
 function touchForStep(lead, step) {
   if (step === 1) {
+    if (!lead.site_url && config.preview_base_url && config.touch_sets.no_website && lead.need_type !== 'governance_audit') {
+      return config.touch_sets.no_website[0];
+    }
     const set = config.touch_sets[lead.need_type] || config.touch_sets.website;
     return set[0];
   }
-  // Automation Readiness Audit pivot: once a general small-business lead
-  // (website/social/both — not Legal AI, not GlobalAggregate) has gone
-  // quiet past the intro + one bump, later touches narrow the ask to a
-  // single low-commitment deliverable instead of repeating a generic
-  // "just checking in." Leaves config.followups untouched for everyone
-  // else, and falls back to it automatically if the pivot list is ever
-  // exhausted or unset.
   const pivot = config.automation_pivot;
   if (pivot && pivot.eligible_need_types.includes(lead.need_type) && step >= pivot.start_step) {
     const pivotTouch = pivot.touches[step - pivot.start_step];
     if (pivotTouch) return pivotTouch;
   }
-  return config.followups[step - 2]; // followups[0] is step 2, etc.
+  return config.followups[step - 2];
 }
 
 async function fetchEligibleLeads() {
@@ -122,8 +129,11 @@ async function fetchEligibleLeads() {
     .select('*')
     .in('status', ['new', 'contacted'])
     .not('email', 'is', null)
+    .neq('email', '')
     .not('need_type', 'is', null)
-    .lt('sequence_step', totalSteps());
+    .lt('sequence_step', totalSteps())
+    .order('created_at', { ascending: true })
+    .limit(2000);
   if (error) throw error;
   return leads || [];
 }
@@ -133,102 +143,100 @@ function isDue(lead) {
   const touch = touchForStep(lead, nextStep);
   if (!touch) return false;
   if (lead.sequence_step === 0) return true;
+  if (!lead.last_contacted) return true;
   const daysSince = (Date.now() - new Date(lead.last_contacted).getTime()) / 86400000;
   return daysSince >= touch.delay_days;
 }
 
+// Supabase returns errors instead of throwing — the old code ignored
+// them, which is how a lead could silently fail to advance.
+// Retries, because a failed save right AFTER an email goes out would
+// leave the lead looking unsent and it could be emailed again next run.
+async function updateLead(id, fields) {
+  let lastError;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const { error } = await supabase.from('leads').update({ ...fields, updated_at: new Date().toISOString() }).eq('id', id);
+    if (!error) return;
+    lastError = error;
+    await new Promise((r) => setTimeout(r, attempt * 1500));
+  }
+  throw new Error(`Supabase update failed after retries (lead ${id}): ${lastError.message}`);
+}
+
 async function notionPatch(pageId, properties) {
-  if (!NOTION_TOKEN || !pageId) return;
+  if (!NOTION_TOKEN || !pageId || DRY_RUN) return;
   const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: 'PATCH',
-    headers: {
-      Authorization: `Bearer ${NOTION_TOKEN}`,
-      'Notion-Version': NOTION_VERSION,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION, 'Content-Type': 'application/json' },
     body: JSON.stringify({ properties }),
   });
   if (!res.ok) console.error(`Notion property update failed: ${await res.text()}`);
 }
 
-// Touch 1 only sends when the lead's "Approve" checkbox is ticked in
-// Notion. Missing token/page or any API error reads as "not approved".
+// Used only when require_notion_approval is on. Any error reads as
+// "not approved".
 async function notionApproved(pageId) {
   if (!NOTION_TOKEN || !pageId) return false;
-  const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-    headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION },
-  });
-  if (!res.ok) return false;
-  const page = await res.json();
-  return page.properties?.Approve?.checkbox === true;
+  try {
+    const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+      headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION },
+    });
+    if (!res.ok) return false;
+    const page = await res.json();
+    return page.properties?.Approve?.checkbox === true;
+  } catch {
+    return false;
+  }
 }
 
 async function notionComment(pageId, text) {
-  if (!NOTION_TOKEN || !pageId) return;
+  if (!NOTION_TOKEN || !pageId || DRY_RUN) return;
   await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
     method: 'PATCH',
-    headers: {
-      Authorization: `Bearer ${NOTION_TOKEN}`,
-      'Notion-Version': NOTION_VERSION,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      children: [{ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text } }] } }],
+      children: [{ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: text.slice(0, 1900) } }] } }],
     }),
   }).catch(() => {});
 }
 
-async function syncDraftToNotion(lead, step, subject, bodyText) {
-  await notionPatch(lead.notion_page_id, {
-    'Drafted Message': { rich_text: [{ text: { content: `Subject: ${subject}\n\n${bodyText}`.slice(0, 1990) } }] },
-    Offer: { rich_text: [{ text: { content: OFFER_LABELS[lead.need_type] || OFFER_LABELS.website } }] },
-  });
-  await notionComment(
-    lead.notion_page_id,
-    `[Automation] Touch ${step} drafted in Gmail on ${new Date().toLocaleDateString()}. Tick "Approve" to have it sent on the next run (to change the wording, edit the Gmail draft). Nothing goes out until you approve.`
-  );
-}
-
-async function syncSentToNotion(lead, step) {
-  await notionPatch(lead.notion_page_id, {
+async function syncSentToNotion(lead, step, subject, bodyText) {
+  const props = {
     'Outreach Step': { number: step },
     'Last Outreach': { date: { start: new Date().toISOString().slice(0, 10) } },
-  });
-  await notionComment(lead.notion_page_id, `[Automation] Touch ${step} sent.`);
+  };
+  if (step === 1 && bodyText) {
+    props['Drafted Message'] = { rich_text: [{ text: { content: `Subject: ${subject}\n\n${bodyText}`.slice(0, 1990) } }] };
+    props.Offer = { rich_text: [{ text: { content: OFFER_LABELS[lead.need_type] || OFFER_LABELS.website } }] };
+  }
+  await notionPatch(lead.notion_page_id, props);
+  await notionComment(lead.notion_page_id, `[Automation] Touch ${step} sent ${new Date().toLocaleDateString('en-US')}.`);
 }
 
-// Shared by both the draft path (touch 1) and the auto-send path
-// (touches 2+) — builds the subject/body/html for whatever touch is due.
+function footer(lead) {
+  const addressLine = BUSINESS_NEED_TYPES.includes(lead.need_type) ? `Wade Capital LLC, ${mailingAddress}\n` : '';
+  return `\n\n--\n${addressLine}If you'd rather not hear from me, just reply "unsubscribe" and I won't email again.`;
+}
+
 function buildMessage(lead, nextStep) {
   const touch = touchForStep(lead, nextStep);
-  const offerPhrase = OFFER_PHRASES[lead.need_type] || OFFER_PHRASES.website;
-
   const vars = {
     business_name: lead.business_name,
-    sender_name: config.sender_name,
+    sender_name: (config.sender_name || '').trim(),
     issue_line: issueLine(lead),
-    offer_phrase: offerPhrase,
+    offer_phrase: OFFER_PHRASES[lead.need_type] || OFFER_PHRASES.website,
     context: lead.outreach_context ? `${lead.outreach_context} ` : '',
+    preview_url: previewUrl(lead) || '',
+    site_url: lead.site_url || '',
   };
-  const subject = fillTemplate(touch.subject, vars);
-  // CAN-SPAM: opt-out line on every touch. The mailing address is private and
-  // only goes to businesses we pitch Wade Capital services to.
-  const addressLine = BUSINESS_NEED_TYPES.includes(lead.need_type) ? `${mailingAddress}\n` : '';
-  const bodyText = `${fillTemplate(touch.body, vars)}\n\n--\n${addressLine}Not interested? Reply "unsubscribe" and I won't email you again.`;
+  // Follow-ups reuse the FIRST email's subject ("Re: ...") so Gmail keeps
+  // the whole sequence in one thread on the recipient's side.
+  const subject = fillTemplate(nextStep > 1 ? touchForStep(lead, 1).subject : touch.subject, vars);
+  const bodyText = fillTemplate(touch.body, vars).replace(/\n{3,}/g, '\n\n') + footer(lead);
   const threadedSubject = nextStep > 1 ? `Re: ${subject}` : subject;
-  const html = `
-    <div style="font-family:sans-serif; font-size:15px; line-height:1.5; color:#1a1a1a;">
-      ${bodyText.split('\n').map((line) => `<p style="margin:0 0 12px;">${line}</p>`).join('')}
-    </div>`;
-
-  return { subject, bodyText, threadedSubject, html };
+  return { subject, bodyText, threadedSubject };
 }
 
-// A lead whose own email already IS the test recipient is a deliberate
-// synthetic test lead (see the one-off test-lead flow) — safe to track
-// fully even while global test_mode is on, since it was never going to
-// reach a real business either way. Only skip tracking for a REAL lead
-// being redirected away from its actual inbox.
 function trackingDecision(lead) {
   const isTest = config.test_mode === true;
   const isSyntheticTestLead = lead.email === config.test_recipient_email;
@@ -236,165 +244,186 @@ function trackingDecision(lead) {
   return { isTest, skipTracking, toAddress: skipTracking ? config.test_recipient_email : lead.email };
 }
 
-// A pending draft from a prior run: send it if approved in Notion, leave
-// it if not, or treat it as sent by hand if it's gone (see file header).
-async function checkPendingDraft(lead) {
-  let sent = null;
-  if (await draftStillPending(lead.gmail_draft_id)) {
-    if (!(await notionApproved(lead.notion_page_id))) return 'pending';
-    sent = await sendDraft(lead.gmail_draft_id);
+// Called when the pre-send email check fails.
+async function rejectEmail(lead, email, reason) {
+  console.log(`  ✗ ${lead.business_name}: not sending to "${email}" (${reason}).`);
+  if (DRY_RUN) return;
+  if (lead.sequence_step === 0) {
+    // Never contacted — clear the bad address so enrichment can look for
+    // a real one after its retry window.
+    await updateLead(lead.id, {
+      email: null,
+      gmail_draft_id: null,
+      email_enrichment_result: `rejected_${reason}`,
+      email_enrichment_attempted_at: new Date().toISOString(),
+    });
+  } else {
+    await updateLead(lead.id, { status: 'bad_email', email_enrichment_result: `rejected_${reason}` });
   }
+}
 
-  const step = lead.sequence_step + 1; // the step that was drafted
+async function advanceAfterSend(lead, step, extra = {}) {
   const isLastTouch = step === totalSteps();
-  const updates = {
+  await updateLead(lead.id, {
     sequence_step: step,
     last_contacted: new Date().toISOString(),
     status: isLastTouch ? 'cold' : 'contacted',
     gmail_draft_id: null,
-  };
-  if (sent?.threadId) updates.gmail_thread_id = sent.threadId;
-  await supabase.from('leads').update(updates).eq('id', lead.id);
-  await syncSentToNotion(lead, step);
-  return sent ? 'approved' : 'sent';
+    ...extra,
+  });
 }
 
-// Touch 1 only: create a Gmail draft, don't send, wait for a human.
-async function draftTouch(lead) {
-  const nextStep = 1;
-  const { subject, bodyText, threadedSubject, html } = buildMessage(lead, nextStep);
-  const { isTest, skipTracking, toAddress } = trackingDecision(lead);
-
-  const finalSubject = isTest ? `[TEST for ${lead.business_name}, ${lead.need_type}, step ${nextStep}] ${threadedSubject}` : threadedSubject;
-  const replyTo = config.reply_to_email && !config.reply_to_email.startsWith('YOUR_') ? config.reply_to_email : undefined;
-
-  const draft = await createDraft({ to: toAddress, subject: finalSubject, html, replyTo });
-
-  if (skipTracking) {
-    console.log(`[TEST] Created a preview draft for ${lead.business_name} (step ${nextStep}) — not tracked, won't affect sequence state.`);
-    return;
+// A touch-1 draft left over from the old manual flow.
+// If it's gone, it was sent by hand: just move the lead forward.
+// If it's still there, it was never sent. Its old copy has no mailing
+// address or opt-out line, so delete it and send the new email instead.
+// Returns 'sent_now' | 'already_sent' | 'rejected'.
+async function resolveLegacyDraft(lead) {
+  const stillThere = DRY_RUN ? true : await draftStillPending(lead.gmail_draft_id);
+  if (!stillThere) {
+    await advanceAfterSend(lead, 1);
+    await syncSentToNotion(lead, 1);
+    return 'already_sent';
   }
-
-  const draftUpdates = { gmail_draft_id: draft.id };
-  if (draft.message && draft.message.threadId) draftUpdates.gmail_thread_id = draft.message.threadId;
-  await supabase.from('leads').update(draftUpdates).eq('id', lead.id);
-  await syncDraftToNotion(lead, nextStep, subject, bodyText);
+  if (!DRY_RUN) {
+    await deleteDraft(lead.gmail_draft_id); // throws on failure, so we never send while the old draft survives
+    await updateLead(lead.id, { gmail_draft_id: null, gmail_thread_id: null });
+  }
+  lead.gmail_draft_id = null;
+  lead.gmail_thread_id = null;
+  const ok = await sendTouch(lead);
+  return ok ? 'sent_now' : 'rejected';
 }
 
-// Touches 2-6 only: send immediately, no draft step. You already
-// approved this lead once at touch 1.
-async function sendFollowupTouch(lead) {
+async function sendTouch(lead) {
   const nextStep = lead.sequence_step + 1;
-  const { threadedSubject, html } = buildMessage(lead, nextStep);
+  const check = await checkSendable(lead.email);
+  if (!check.ok) {
+    await rejectEmail(lead, lead.email, check.reason);
+    return false;
+  }
+  if (check.email !== lead.email && !DRY_RUN) await updateLead(lead.id, { email: check.email });
+  lead.email = check.email;
+
+  const { subject, bodyText, threadedSubject } = buildMessage(lead, nextStep);
   const { isTest, skipTracking, toAddress } = trackingDecision(lead);
+  const finalSubject = isTest ? `[TEST for ${lead.business_name}, step ${nextStep}] ${threadedSubject}` : threadedSubject;
 
-  const finalSubject = isTest ? `[TEST for ${lead.business_name}, ${lead.need_type}, step ${nextStep}] ${threadedSubject}` : threadedSubject;
-  const replyTo = config.reply_to_email && !config.reply_to_email.startsWith('YOUR_') ? config.reply_to_email : undefined;
-
-  await sendGmail({ to: toAddress, subject: finalSubject, html, replyTo, threadId: lead.gmail_thread_id });
-
-  if (skipTracking) {
-    console.log(`[TEST] Sent a preview follow-up for ${lead.business_name} (step ${nextStep}) — not tracked.`);
-    return;
+  if (DRY_RUN) {
+    console.log(`\n  → [dry run] step ${nextStep} to ${toAddress} (${lead.business_name})\n  Subject: ${finalSubject}\n${bodyText.replace(/^/gm, '    ')}\n`);
+    return true;
   }
 
-  const isLastTouch = nextStep === totalSteps();
-  await supabase.from('leads').update({
-    sequence_step: nextStep,
-    last_contacted: new Date().toISOString(),
-    status: isLastTouch ? 'cold' : 'contacted',
-  }).eq('id', lead.id);
-  await syncSentToNotion(lead, nextStep);
+  const sent = await sendGmail({
+    to: toAddress,
+    subject: finalSubject,
+    text: bodyText,
+    replyTo: config.reply_to_email || undefined,
+    fromName: config.from_display_name || undefined,
+    fromEmail: config.from_display_name ? config.reply_to_email : undefined,
+    threadId: nextStep > 1 ? lead.gmail_thread_id : undefined,
+  });
+
+  if (skipTracking) {
+    console.log(`[TEST] Sent a preview of step ${nextStep} for ${lead.business_name} to the test inbox — not tracked.`);
+    return true;
+  }
+  await advanceAfterSend(lead, nextStep, nextStep === 1 ? { gmail_thread_id: sent.threadId } : {});
+  await syncSentToNotion(lead, nextStep, subject, bodyText);
+  return true;
 }
 
 async function run() {
   config = await loadSetting(supabase, 'outreach');
 
-  if (config.sender_name.startsWith('YOUR_')) {
-    console.log('outreach-sequencer: settings.outreach still has a placeholder sender_name — skipping run.');
-    return;
-  }
   mailingAddress = await loadSetting(supabase, 'business_mailing_address').catch(() => null);
-  if (typeof mailingAddress !== 'string' || !mailingAddress.trim()) {
-    console.log('outreach-sequencer: settings row business_mailing_address is not set (required by CAN-SPAM) — skipping run.');
+  if (typeof mailingAddress !== 'string' || !mailingAddress.trim() || /^YOUR_/i.test(mailingAddress)) {
+    console.log('outreach-sequencer: the business_mailing_address settings row is not set. U.S. law (CAN-SPAM) requires a mailing address in commercial email, so nothing will send until it is.');
     return;
   }
+  mailingAddress = mailingAddress.trim();
+  const requireApproval = config.require_notion_approval === true;
 
+  const maxNew = config.max_new_sends_per_run ?? 40;
+  const maxFollowups = config.max_followups_per_run ?? 50;
   const leads = await fetchEligibleLeads();
 
-  let checked = 0;
-  let detectedSent = 0;
-  let approvedSent = 0;
-  let newDrafts = 0;
-  let followupsSent = 0;
+  const counts = { legacySent: 0, legacyAlready: 0, newSent: 0, followups: 0, rejected: 0, errors: 0, awaitingApproval: 0 };
 
-  let skipped = 0;
-  let rateLimited = 0;
+  // Follow-ups first (these people have already heard from us once),
+  // then brand-new leads, oldest first.
+  const followupLeads = leads.filter((l) => l.sequence_step > 0);
+  const firstTouchLeads = leads.filter((l) => l.sequence_step === 0);
 
-  for (const lead of leads) {
+  const queue = [...followupLeads, ...firstTouchLeads];
+
+  for (const lead of queue) {
     try {
-      if (lead.gmail_draft_id) {
-        checked++;
-        const outcome = await checkPendingDraft(lead);
-        if (outcome === 'sent') detectedSent++;
-        if (outcome === 'approved') approvedSent++;
-        continue;
-      }
-      if (!isDue(lead)) continue;
-
-      const nextStep = lead.sequence_step + 1;
-      if (nextStep === 1) {
-        if (newDrafts >= (config.max_new_drafts_per_run ?? 25)) continue;
-        await draftTouch(lead);
-        newDrafts++;
+      if (lead.sequence_step === 0) {
+        if (counts.newSent + counts.legacySent >= maxNew && !lead.gmail_draft_id) continue;
+        if (lead.gmail_draft_id) {
+          if (counts.newSent + counts.legacySent >= maxNew) {
+            // Still resolve drafts that were already sent by hand — that
+            // costs no send quota.
+            if (DRY_RUN) continue;
+            const pending = await draftStillPending(lead.gmail_draft_id);
+            if (pending) continue;
+          }
+          if (requireApproval && !(await notionApproved(lead.notion_page_id))) {
+            // Approval mode: a draft still sitting there waits for the tick;
+            // one that's gone was sent by hand, so it still moves forward.
+            if (DRY_RUN || (await draftStillPending(lead.gmail_draft_id))) {
+              counts.awaitingApproval++;
+              continue;
+            }
+          }
+          const outcome = await resolveLegacyDraft(lead);
+          if (outcome === 'sent_now') counts.legacySent++;
+          else if (outcome === 'already_sent') counts.legacyAlready++;
+          else counts.rejected++;
+          continue;
+        }
+        if (requireApproval && !(await notionApproved(lead.notion_page_id))) {
+          if (!lead.notion_page_id || DRY_RUN) continue;
+          const { subject, bodyText } = buildMessage(lead, 1);
+          await notionPatch(lead.notion_page_id, {
+            'Drafted Message': { rich_text: [{ text: { content: `Subject: ${subject}\n\n${bodyText}`.slice(0, 1990) } }] },
+            Offer: { rich_text: [{ text: { content: OFFER_LABELS[lead.need_type] || OFFER_LABELS.website } }] },
+          });
+          counts.awaitingApproval++;
+          continue;
+        }
+        const ok = await sendTouch(lead);
+        if (ok) counts.newSent++;
+        else counts.rejected++;
       } else {
-        if (followupsSent >= (config.max_followups_per_run ?? 30)) continue;
-        await sendFollowupTouch(lead);
-        followupsSent++;
+        if (counts.followups >= maxFollowups || !isDue(lead)) continue;
+        const ok = await sendTouch(lead);
+        if (ok) counts.followups++;
+        else counts.rejected++;
       }
     } catch (err) {
-      const isRateLimit = /rateLimitExceeded|RESOURCE_EXHAUSTED|Quota exceeded/i.test(err.message);
-      if (isRateLimit) {
-        // Transient — Gmail's per-minute quota tripped, likely because there
-        // were enough leads left to check that we ran through the budget.
-        // Every remaining check this run would fail the same way, so stop
-        // here rather than burning through them one at a time. Leave this
-        // lead (and everything behind it) completely untouched — it'll be
-        // re-checked from where we left off next run.
-        rateLimited++;
-        console.error(`outreach-sequencer: hit Gmail's rate limit while checking "${lead.business_name}" — stopping this run early. ${leads.length - checked - newDrafts - followupsSent} lead(s) left unchecked, will retry next run.`);
+      if (/rateLimitExceeded|RESOURCE_EXHAUSTED|Quota exceeded|userRateLimitExceeded/i.test(err.message)) {
+        console.error(`outreach-sequencer: Gmail rate limit reached at "${lead.business_name}" — stopping; the rest go out next run.`);
         break;
       }
-      // One bad record (e.g. a malformed scraped email) should never
-      // take down every other lead behind it in this run. Log it,
-      // clear the email so it falls out of eligibility and gets
-      // re-attempted by enrich-emails.mjs, and move on.
-      skipped++;
-      console.error(`outreach-sequencer: skipping "${lead.business_name}" (id ${lead.id}) after error: ${err.message}`);
-      try {
-        await supabase.from('leads').update({ email: null }).eq('id', lead.id);
-      } catch (cleanupErr) {
-        console.error(`outreach-sequencer: also failed to clear email for "${lead.business_name}": ${cleanupErr.message}`);
-      }
-      try {
-        await notionComment(
-          lead.notion_page_id,
-          `[Automation] Outreach failed for this lead (${err.message}). Email cleared so it can be re-checked by the enrichment step — if it fails again, the email likely needs to be fixed by hand.`
-        );
-      } catch {
-        // notionComment failing is non-critical; already logged via the outer skip.
+      counts.errors++;
+      console.error(`outreach-sequencer: error on "${lead.business_name}" (id ${lead.id}): ${err.message}`);
+      if (/Supabase update failed after retries/.test(err.message)) {
+        console.error('outreach-sequencer: stopping the run — the database is not saving progress, and continuing could double-send.');
+        process.exitCode = 1;
+        break;
       }
     }
   }
 
-  if (rateLimited > 0) {
-    console.log(`outreach-sequencer: stopped early after a rate-limit error — see log above.`);
-  }
-  if (skipped > 0) {
-    console.log(`outreach-sequencer: ${skipped} lead(s) skipped due to errors this run — see log above for details.`);
-  }
   console.log(
-    `outreach-sequencer: ${leads.length} eligible. ${checked} pending touch-1 draft(s) checked (${approvedSent} sent after Notion approval, ${detectedSent} sent by hand). ${newDrafts}/${config.max_new_drafts_per_run ?? 25} new touch-1 draft(s) created, ${followupsSent}/${config.max_followups_per_run ?? 30} follow-up(s) auto-sent this run.${config.test_mode ? ' [TEST MODE]' : ''}`
+    `outreach-sequencer${DRY_RUN ? ' [DRY RUN]' : ''}: ${leads.length} eligible. ` +
+      `First emails sent: ${counts.newSent} new + ${counts.legacySent} leftover drafts (cap ${maxNew}). ` +
+      `Leftover drafts already sent by hand: ${counts.legacyAlready}. Follow-ups: ${counts.followups} (cap ${maxFollowups}). ` +
+      `Bad addresses skipped: ${counts.rejected}. Errors: ${counts.errors}.` +
+      (requireApproval ? ` Waiting for Notion approval: ${counts.awaitingApproval}.` : '') +
+      (config.test_mode ? ' [TEST MODE]' : '')
   );
 }
 

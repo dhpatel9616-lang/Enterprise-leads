@@ -14,6 +14,7 @@
  */
 const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
+const { looksValid } = require('./lib/email-quality');
 
 const PLACES_KEY = process.env.GOOGLE_PLACES_API_KEY;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
@@ -29,13 +30,10 @@ if (!PLACES_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID || !SUPABASE_URL || !SUP
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const NOTION_VERSION = '2022-06-28';
 
-const EMAIL_SHAPE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-
 // Some sites HTML-entity-encode their contact email to defeat simple
 // regex scrapers (e.g. "info@x.com" becomes "&#105;&#110;&#102;...").
-// Decode before validating, and only accept the result if it actually
-// looks like an email — otherwise a stray "mailto:#" or similar junk
-// ends up stored as someone's "email address."
+// Decode first, then run the shared quality check (lib/email-quality.js),
+// which also rejects template placeholders like user@domain.com.
 function decodeHtmlEntities(str) {
   return str
     .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
@@ -43,9 +41,6 @@ function decodeHtmlEntities(str) {
     .replace(/&amp;/g, '&');
 }
 
-function isValidEmailShape(email) {
-  return EMAIL_SHAPE.test(email) && email !== 'wadecapitallc@gmail.com';
-}
 const NOTION_API = 'https://api.notion.com/v1';
 
 const SOCIAL_DOMAINS = ['facebook.com/', 'instagram.com/', 'twitter.com/', 'x.com/', 'tiktok.com/', 'linkedin.com/company'];
@@ -79,7 +74,7 @@ async function searchPlaces(query, locationBias) {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': PLACES_KEY,
       'X-Goog-FieldMask':
-        'places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.id',
+        'places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.id,places.businessStatus',
     },
     body: JSON.stringify({
       textQuery: query.q,
@@ -89,11 +84,13 @@ async function searchPlaces(query, locationBias) {
           radius: locationBias.radius_meters,
         },
       },
-      maxResultCount: 15,
+      pageSize: 20,
     }),
   });
   const data = await res.json();
-  return data.places || [];
+  if (!res.ok) throw new Error(`Places search failed: ${JSON.stringify(data).slice(0, 300)}`);
+  // Skip businesses Google marks as closed.
+  return (data.places || []).filter((p) => !p.businessStatus || p.businessStatus === 'OPERATIONAL');
 }
 
 // Checks the business's own site for: does it exist, is it mobile
@@ -116,8 +113,7 @@ async function checkSite(url) {
     mobileOk = /<meta[^>]+name=["']viewport["']/i.test(html);
     const mailtoMatch = html.match(/mailto:([^"'?\s]+)/i);
     if (mailtoMatch) {
-      const candidate = decodeHtmlEntities(mailtoMatch[1]).trim().toLowerCase();
-      if (isValidEmailShape(candidate)) email = candidate;
+      email = looksValid(decodeHtmlEntities(mailtoMatch[1]));
     }
     hasSocial = SOCIAL_DOMAINS.some((domain) => html.toLowerCase().includes(domain));
   } catch {
@@ -200,19 +196,18 @@ async function createLeadPage({ businessName, phone, siteUrl, hasSite, hasSsl, m
   return data.id;
 }
 
-async function mirrorToSupabase({ businessName, category, phone, email, siteUrl, hasSsl, mobileOk, hasSocial, needType, notionPageId }) {
-  const { data: existing } = await supabase
-    .from('leads')
-    .select('id')
-    .eq('business_name', businessName)
-    .eq('site_url', siteUrl)
-    .maybeSingle();
+async function mirrorToSupabase({ businessName, category, phone, email, siteUrl, hasSsl, mobileOk, hasSocial, needType, notionPageId, address, locationName }) {
+  // `.eq('site_url', null)` never matches in SQL, so businesses with no
+  // website used to slip past this duplicate check — use .is() for null.
+  let dupeQuery = supabase.from('leads').select('id').eq('business_name', businessName);
+  dupeQuery = siteUrl ? dupeQuery.eq('site_url', siteUrl) : dupeQuery.is('site_url', null);
+  const { data: existing } = await dupeQuery.limit(1).maybeSingle();
 
   if (existing) return;
 
   const product = CATEGORY_PRODUCT_MAP[category] || 'enterprise';
 
-  await supabase.from('leads').insert({
+  const { error } = await supabase.from('leads').insert({
     business_name: businessName,
     category,
     phone,
@@ -226,7 +221,10 @@ async function mirrorToSupabase({ businessName, category, phone, email, siteUrl,
     status: 'new',
     sequence_step: 0,
     notion_page_id: notionPageId,
+    address: address || null,
+    location_name: locationName || null,
   });
+  if (error) console.error(`notion-leads-ingest: Supabase insert failed for ${businessName}: ${error.message}`);
 }
 
 function shuffle(arr) {
@@ -265,7 +263,30 @@ function buildQueries(config) {
 // category::location, NOT category alone — otherwise "law firms in
 // State College" and "law firms in DC" would compete for the same
 // shared budget the moment a second location is added.
-const CATEGORY_CAP_PER_RUN = 5;
+const DEFAULT_COMBO_CAP = 5;
+
+// ---- Google billing guard ----
+// Asking Places for website + phone puts every search in Google's
+// "Text Search Enterprise" price tier: the first 1,000 searches each
+// month are free, then about $35 per 1,000. Every search is counted in
+// the `places_usage` settings row, and the run stops before the monthly
+// cap (default 950) so this never produces a bill.
+function monthKey() {
+  return new Date().toISOString().slice(0, 7);
+}
+
+async function loadUsage() {
+  const { data } = await supabase.from('settings').select('value').eq('key', 'places_usage').maybeSingle();
+  const value = data?.value || {};
+  return value.month === monthKey() ? value : { month: monthKey(), searches: 0 };
+}
+
+async function saveUsage(usage) {
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key: 'places_usage', value: usage, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  if (error) console.error(`notion-leads-ingest: couldn't save search usage: ${error.message}`);
+}
 
 // Ranks candidates so the worst-off businesses (biggest real opportunity)
 // get written first within a category, rather than whatever order Google
@@ -287,6 +308,11 @@ function priorityScore({ hasSite, hasSsl, mobileOk, hasSocial, needType }) {
 async function run() {
   const config = await loadSetting(supabase, 'places_queries');
   const maxNew = config.max_new_leads_per_run ?? 10;
+  const comboCap = config.max_per_combo_per_run ?? DEFAULT_COMBO_CAP;
+  const maxSearchesThisRun = config.max_searches_per_run ?? 40;
+  const monthlyCap = config.monthly_search_cap ?? 950;
+  const usage = await loadUsage();
+  let searchesThisRun = 0;
   const queries = shuffle(buildQueries(config)); // rotate which location×category combos win the daily cap
 
   let processed = 0;
@@ -297,22 +323,36 @@ async function run() {
   for (const query of queries) {
     if (written >= maxNew) break;
     const comboKey = `${query.category}::${query.locationName}`;
-    if ((categoryCounts[comboKey] || 0) >= CATEGORY_CAP_PER_RUN) continue; // this category/location combo already had its share today — try the next for variety
+    if ((categoryCounts[comboKey] || 0) >= comboCap) continue; // this category/location combo already had its share today — try the next for variety
+    if (searchesThisRun >= maxSearchesThisRun) break;
+    if (usage.searches >= monthlyCap) {
+      console.log(`notion-leads-ingest: ${usage.searches} Google searches used this month (cap ${monthlyCap}) — stopping to stay in the free tier.`);
+      break;
+    }
 
-    const places = await searchPlaces(query, query.locationBias);
+    let places;
+    try {
+      places = await searchPlaces(query, query.locationBias);
+    } finally {
+      // Saved after every search so a crash mid-run can't undercount.
+      searchesThisRun++;
+      usage.searches++;
+      await saveUsage(usage);
+    }
     const candidates = [];
 
     for (const place of places) {
       const businessName = place.displayName?.text || 'Unknown';
       const siteUrl = place.websiteUri || null;
       const phone = place.nationalPhoneNumber || null;
+      const address = place.formattedAddress || null;
       const { hasSite, hasSsl, mobileOk, email, hasSocial } = await checkSite(siteUrl);
       const needType = CATEGORY_NEED_OVERRIDES[query.category] || classifyNeed({ hasSite, hasSsl, mobileOk, hasSocial });
       processed++;
       if (!needType) continue;
       flagged++;
       candidates.push({
-        businessName, siteUrl, phone, hasSite, hasSsl, mobileOk, email, hasSocial, needType, placeId: place.id,
+        businessName, siteUrl, phone, address, hasSite, hasSsl, mobileOk, email, hasSocial, needType, placeId: place.id,
         score: priorityScore({ hasSite, hasSsl, mobileOk, hasSocial, needType }),
       });
     }
@@ -321,20 +361,20 @@ async function run() {
 
     for (const c of candidates) {
       if (written >= maxNew) break;
-      if ((categoryCounts[comboKey] || 0) >= CATEGORY_CAP_PER_RUN) break;
+      if ((categoryCounts[comboKey] || 0) >= comboCap) break;
 
       const exists = await alreadyExists(c.businessName);
       if (exists) continue;
 
       const notionPageId = await createLeadPage({ ...c, category: query.category, locationName: query.locationName });
-      await mirrorToSupabase({ ...c, category: query.category, notionPageId });
+      await mirrorToSupabase({ ...c, category: query.category, notionPageId, locationName: query.locationName });
       written++;
       categoryCounts[comboKey] = (categoryCounts[comboKey] || 0) + 1;
     }
   }
 
   console.log(
-    `notion-leads-ingest: processed ${processed}, flagged ${flagged}, wrote ${written} new leads across ${Object.keys(categoryCounts).length} category/location combos (cap: ${maxNew}, max ${CATEGORY_CAP_PER_RUN}/combo).`
+    `notion-leads-ingest: ${searchesThisRun} Google searches (${usage.searches}/${monthlyCap} this month), processed ${processed}, flagged ${flagged}, wrote ${written} new leads across ${Object.keys(categoryCounts).length} category/location combos (cap: ${maxNew}, max ${comboCap}/combo).`
   );
 }
 

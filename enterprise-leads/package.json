@@ -10,7 +10,8 @@
     "outreach": "node ingest/outreach-sequencer.js",
     "check-replies": "node ingest/check-replies.js",
     "enrich": "node ingest/enrich-emails.mjs",
-    "phone-screen": "node ingest/phone-screen.js"
+    "phone-screen": "node ingest/phone-screen.js",
+    "re-baltimore": "node real-estate/baltimore-pull.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

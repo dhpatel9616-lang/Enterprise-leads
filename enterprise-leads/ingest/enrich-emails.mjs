@@ -13,6 +13,12 @@
 import { createClient } from "@supabase/supabase-js";
 import { existsSync } from "node:fs";
 import puppeteer from "puppeteer-core";
+import emailQuality from "./lib/email-quality.js";
+
+// Shared with the ingest + outreach scripts: rejects template
+// placeholders (user@domain.com, hi@mystore.com, ...) and cleans up
+// URL-encoded junk like "%20name@gmail.com".
+const { looksValid } = emailQuality;
 
 // GitHub's ubuntu-latest runners ship a system Chrome — using it directly
 // avoids downloading a separate Chromium bundle on every run.
@@ -153,17 +159,15 @@ function extractEmails(rawHtml) {
   const found = new Set();
 
   // mailto: links are the highest-confidence signal
-  const mailtoMatches = html.matchAll(/mailto:([^"'\s?]+)/gi);
-  for (const m of mailtoMatches) {
-    const email = m[1].trim().toLowerCase();
-    if (isValidEmailShape(email) && !isJunkEmail(email)) found.add(email);
+  for (const m of html.matchAll(/mailto:([^"'\s?]+)/gi)) {
+    const email = looksValid(m[1]);
+    if (email && !isJunkEmail(email)) found.add(email);
   }
 
   // Fallback: plain-text email pattern anywhere in the page
-  const textMatches = html.match(EMAIL_REGEX) || [];
-  for (const raw of textMatches) {
-    const email = raw.trim().toLowerCase();
-    if (!isJunkEmail(email)) found.add(email);
+  for (const raw of html.match(EMAIL_REGEX) || []) {
+    const email = looksValid(raw);
+    if (email && !isJunkEmail(email)) found.add(email);
   }
 
   return Array.from(found);
