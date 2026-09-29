@@ -17,8 +17,10 @@
  *     is a reply, so it stops the same way).
  *
  * Every touch carries an opt-out line. Business service pitches
- * (BUSINESS_NEED_TYPES) also carry settings.outreach.physical_address, as
- * CAN-SPAM requires; the address is private and never goes anywhere else.
+ * (BUSINESS_NEED_TYPES) also carry the mailing address from the private
+ * `business_mailing_address` settings row (a JSON string), as CAN-SPAM
+ * requires. It is never hard-coded and never goes anywhere but those emails;
+ * RLS hides that row from the anon key, so only this service-key job reads it.
  * The run skips entirely until that address is set.
  *
  * If you don't want a drafted touch-1 to send, just leave "Approve"
@@ -51,6 +53,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !process.env.GMAIL_CLIENT_ID || !p
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 let config;
+let mailingAddress; // private: business outreach emails only
 
 function fillTemplate(str, vars) {
   return str.replace(/\{(\w+)\}/g, (_, key) => vars[key] ?? '');
@@ -210,7 +213,7 @@ function buildMessage(lead, nextStep) {
   const subject = fillTemplate(touch.subject, vars);
   // CAN-SPAM: opt-out line on every touch. The mailing address is private and
   // only goes to businesses we pitch Wade Capital services to.
-  const addressLine = BUSINESS_NEED_TYPES.includes(lead.need_type) ? `${config.physical_address}\n` : '';
+  const addressLine = BUSINESS_NEED_TYPES.includes(lead.need_type) ? `${mailingAddress}\n` : '';
   const bodyText = `${fillTemplate(touch.body, vars)}\n\n--\n${addressLine}Not interested? Reply "unsubscribe" and I won't email you again.`;
   const threadedSubject = nextStep > 1 ? `Re: ${subject}` : subject;
   const html = `
@@ -311,8 +314,9 @@ async function run() {
     console.log('outreach-sequencer: settings.outreach still has a placeholder sender_name — skipping run.');
     return;
   }
-  if (!config.physical_address || config.physical_address.startsWith('YOUR_')) {
-    console.log('outreach-sequencer: settings.outreach.physical_address is not set (required by CAN-SPAM) — skipping run.');
+  mailingAddress = await loadSetting(supabase, 'business_mailing_address').catch(() => null);
+  if (typeof mailingAddress !== 'string' || !mailingAddress.trim()) {
+    console.log('outreach-sequencer: settings row business_mailing_address is not set (required by CAN-SPAM) — skipping run.');
     return;
   }
 
