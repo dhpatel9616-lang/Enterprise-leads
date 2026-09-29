@@ -40,6 +40,17 @@ if (!OUTPUT_JSON && !supabase) {
   process.exit(0);
 }
 
+// Diagnostics saved to pipeline_runs (GitHub logs aren't always reachable).
+const diag = { layers: {} };
+async function saveRunLog(summary, errors = []) {
+  if (!supabase) return;
+  try {
+    await supabase.from("pipeline_runs").insert({ script: "re-baltimore", summary: String(summary).slice(0, 2000), errors: [{ context: "diagnostics", message: JSON.stringify(diag).slice(0, 4000) }, ...errors] });
+  } catch {
+    // never break the run over logging
+  }
+}
+
 const DAY = 86400000;
 const NOW = Date.now();
 
@@ -75,6 +86,14 @@ async function fetchAll(layerId, outFields, where = "1=1") {
     });
     const data = await getJson(`${BASE}/${layerId}/query?${params}`);
     const feats = data.features || [];
+    if (page === 0) {
+      diag.layers[layerId] = {
+        firstPageCount: feats.length,
+        exceeded: data.exceededTransferLimit ?? null,
+        keys: feats[0] ? Object.keys(feats[0].attributes) : null,
+        sample: feats[0] ? feats[0].attributes : JSON.stringify(data).slice(0, 400),
+      };
+    }
     if (feats.length === 0) break;
     for (const f of feats) rows.push(f.attributes);
     lastId = feats[feats.length - 1].attributes.OBJECTID;
@@ -299,10 +318,13 @@ async function main() {
     const { error } = await supabase.from("re_buyers").upsert(buyers.slice(i, i + 500), { onConflict: "owner_key" });
     if (error) throw new Error(`re_buyers upsert failed: ${error.message}`);
   }
-  console.log(`\nbaltimore-pull: saved ${properties.length} properties and ${buyers.length} buyers to Supabase.`);
+  const summary = `vacancy notices ${vacants.length}, foreclosure filings ${foreclosures.length} (newest ${fcDates[0] ? toISODate(fcDates[0]) : "none"}), parcels ${parcels.length}, parcel matches ${properties.filter((p) => p.owner_1).length}; saved ${properties.length} properties (${properties.filter((p) => p.score >= 8).length} scoring 8+) and ${buyers.length} buyers`;
+  console.log(`\nbaltimore-pull: ${summary}`);
+  await saveRunLog(summary);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("baltimore-pull failed:", err.message);
+  await saveRunLog("run failed", [{ context: "run", message: String(err.message).slice(0, 500) }]);
   process.exit(1);
 });

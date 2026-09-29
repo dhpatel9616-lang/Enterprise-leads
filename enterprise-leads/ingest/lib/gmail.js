@@ -32,6 +32,28 @@ async function getAccessToken() {
   return cachedAccessToken;
 }
 
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Every Gmail API call goes through here. Gmail limits how much each
+// account can do per minute; when it says "slow down" (429, or 403 with
+// rateLimitExceeded), wait and retry instead of failing the lead.
+async function gmailFetch(url, options = {}) {
+  for (let attempt = 1; ; attempt++) {
+    const accessToken = await getAccessToken();
+    const res = await fetch(url, { ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` } });
+    if (res.status === 429 || res.status === 403) {
+      const text = await res.text();
+      if (/rateLimitExceeded|RESOURCE_EXHAUSTED|Quota exceeded|userRateLimitExceeded/i.test(text) && attempt < 5) {
+        await sleep(15000 * attempt);
+        continue;
+      }
+      return new Response(text, { status: res.status, headers: res.headers });
+    }
+    return res;
+  }
+}
+
 function base64url(str) {
   return Buffer.from(str, 'utf-8')
     .toString('base64')
@@ -90,14 +112,13 @@ function buildRawMessage({ to, subject, html, text, replyTo, fromName, fromEmail
 // earlier touches. Returns { id, threadId } — save threadId to track
 // this lead's conversation for reply-detection.
 async function sendGmail({ to, subject, html, text, replyTo, threadId, fromName, fromEmail }) {
-  const accessToken = await getAccessToken();
   const raw = buildRawMessage({ to, subject, html, text, replyTo, fromName, fromEmail });
   const body = { raw };
   if (threadId) body.threadId = threadId;
 
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+  const res = await gmailFetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   const data = await res.json();
@@ -110,14 +131,13 @@ async function sendGmail({ to, subject, html, text, replyTo, threadId, fromName,
 // { id, message: { id, threadId } }. Save the returned draft `id` so a
 // later run can check draftStillPending() to detect whether it was sent.
 async function createDraft({ to, subject, html, text, replyTo, threadId, fromName, fromEmail }) {
-  const accessToken = await getAccessToken();
   const raw = buildRawMessage({ to, subject, html, text, replyTo, fromName, fromEmail });
   const message = { raw };
   if (threadId) message.threadId = threadId;
 
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
+  const res = await gmailFetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message }),
   });
   const data = await res.json();
@@ -132,10 +152,7 @@ async function createDraft({ to, subject, html, text, replyTo, threadId, fromNam
 // two apart; the caller treats "gone" as "sent" and documents that
 // assumption to the person.
 async function draftStillPending(draftId) {
-  const accessToken = await getAccessToken();
-  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}?format=minimal`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const res = await gmailFetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}?format=minimal`);
   if (res.status === 404) return false;
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -148,10 +165,7 @@ async function draftStillPending(draftId) {
 // check-replies.js to tell "a reply came in" apart from "this is one
 // of our own sent messages."
 async function getOwnEmailAddress() {
-  const accessToken = await getAccessToken();
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const res = await gmailFetch('https://gmail.googleapis.com/gmail/v1/users/me/profile');
   const data = await res.json();
   if (!res.ok) throw new Error(`Gmail profile fetch failed: ${JSON.stringify(data)}`);
   return data.emailAddress;
@@ -163,10 +177,9 @@ async function getOwnEmailAddress() {
 // (instead of composing a fresh email) guarantees nobody gets two copies.
 // Returns { id, threadId } of the sent message.
 async function sendDraft(draftId) {
-  const accessToken = await getAccessToken();
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send', {
+  const res = await gmailFetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: draftId }),
   });
   const data = await res.json();
@@ -176,10 +189,8 @@ async function sendDraft(draftId) {
 
 // Deletes a draft. A 404 means it's already gone, which is fine.
 async function deleteDraft(draftId) {
-  const accessToken = await getAccessToken();
-  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`, {
+  const res = await gmailFetch(`https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`, {
     method: 'DELETE',
-    headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok && res.status !== 404) {
     const data = await res.json().catch(() => ({}));
@@ -192,11 +203,7 @@ async function deleteDraft(draftId) {
 // enough for check-replies.js to tell a real reply apart from a bounce
 // notice, an out-of-office auto-reply, or an unsubscribe request.
 async function getThreadMessages(threadId) {
-  const accessToken = await getAccessToken();
-  const res = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Auto-Submitted`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
+  const res = await gmailFetch(`https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Auto-Submitted`);
   const data = await res.json();
   if (res.status === 404) return [];
   if (!res.ok) throw new Error(`Gmail thread fetch failed: ${JSON.stringify(data)}`);

@@ -316,6 +316,9 @@ async function sendTouch(lead) {
     return true;
   }
 
+  // A short pause before each send keeps Gmail's per-minute limit happy
+  // and makes the sending pattern look less like a blast.
+  await new Promise((r) => setTimeout(r, 1500));
   const sent = await sendGmail({
     to: toAddress,
     subject: finalSubject,

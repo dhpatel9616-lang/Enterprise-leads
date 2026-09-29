@@ -125,6 +125,8 @@ async function run() {
   const tally = { reply: 0, unsubscribe: 0, bounce: 0, auto: 0, restored: 0 };
 
   for (const lead of leads) {
+    // Pace thread reads so a big batch stays under Gmail's per-minute limit.
+    await new Promise((r) => setTimeout(r, 400));
     try {
       const kind = await inspectThread(lead.gmail_thread_id, ownEmail);
       const isLegacy = lead.status === 'replied';
