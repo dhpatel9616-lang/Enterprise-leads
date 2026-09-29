@@ -3,7 +3,12 @@ name: Send Outreach Touches
 on:
   schedule:
     - cron: '34 13 * * 1-5' # ~9:34am ET, Mon-Fri (staggered off :00 to avoid GH Actions cron congestion)
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview only: log what would send, send nothing'
+        type: boolean
+        default: false
 
 jobs:
   outreach:
@@ -25,3 +30,4 @@ jobs:
           GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
           GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}

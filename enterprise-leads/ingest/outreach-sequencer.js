@@ -46,6 +46,7 @@ const { loadSetting } = require('./lib/settings');
 const { sendGmail, deleteDraft, draftStillPending } = require('./lib/gmail');
 const { checkSendable } = require('./lib/email-quality');
 const { previewUrl: buildPreviewUrl } = require('./lib/preview');
+const { createRunLog } = require('./lib/run-log');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -59,6 +60,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || (!DRY_RUN && (!process.env.GMAIL_C
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const runLog = createRunLog(supabase, DRY_RUN ? 'outreach-sequencer-dry-run' : 'outreach-sequencer');
 let config;
 let mailingAddress; // private: from the business_mailing_address settings row
 
@@ -409,6 +411,7 @@ async function run() {
       }
       counts.errors++;
       console.error(`outreach-sequencer: error on "${lead.business_name}" (id ${lead.id}): ${err.message}`);
+      runLog.error(`${lead.business_name} (${lead.id})`, err);
       if (/Supabase update failed after retries/.test(err.message)) {
         console.error('outreach-sequencer: stopping the run — the database is not saving progress, and continuing could double-send.');
         process.exitCode = 1;
@@ -417,17 +420,21 @@ async function run() {
     }
   }
 
-  console.log(
-    `outreach-sequencer${DRY_RUN ? ' [DRY RUN]' : ''}: ${leads.length} eligible. ` +
+  const summary =
+    `${leads.length} eligible. ` +
       `First emails sent: ${counts.newSent} new + ${counts.legacySent} leftover drafts (cap ${maxNew}). ` +
       `Leftover drafts already sent by hand: ${counts.legacyAlready}. Follow-ups: ${counts.followups} (cap ${maxFollowups}). ` +
       `Bad addresses skipped: ${counts.rejected}. Errors: ${counts.errors}.` +
       (requireApproval ? ` Waiting for Notion approval: ${counts.awaitingApproval}.` : '') +
       (config.test_mode ? ' [TEST MODE]' : '')
-  );
+  ;
+  console.log(`outreach-sequencer${DRY_RUN ? ' [DRY RUN]' : ''}: ${summary}`);
+  await runLog.finish(summary);
 }
 
-run().catch((err) => {
+run().catch(async (err) => {
   console.error('outreach-sequencer failed:', err);
+  runLog.error('run', err);
+  await runLog.finish('run failed');
   process.exit(1);
 });

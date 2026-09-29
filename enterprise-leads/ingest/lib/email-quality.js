@@ -33,6 +33,8 @@ const JUNK_PATTERNS = [
   /^(test|user|you|your|yourname|name|email|john|jane|johndoe|janedoe|someone|example|firstname|first\.last)@/i,
   // mailboxes that never reach a human
   /^(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster|webmaster|abuse|bounce|bounces)@/i,
+  // analytics / tracking / dev-tool vendors whose addresses leak into page scripts
+  /@([a-z0-9-]+\.)?(keen\.io|segment\.(com|io)|mixpanel\.com|intercom\.io|hotjar\.com|cloudflare\.com|jquery\.com|github\.com|googlegroups\.com|squarespace\.com|wix\.com|shopify\.com|mailchimp\.com|sentry-cdn\.com)$/i,
   // our own address (the scraper's User-Agent contains it)
   /^wadecapitallc@gmail\.com$/i,
 ];

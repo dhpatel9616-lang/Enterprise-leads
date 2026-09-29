@@ -23,6 +23,7 @@
  */
 const { createClient } = require('@supabase/supabase-js');
 const { getOwnEmailAddress, getThreadMessages } = require('./lib/gmail');
+const { createRunLog } = require('./lib/run-log');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -35,6 +36,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !process.env.GMAIL_CLIENT_ID || !p
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const runLog = createRunLog(supabase, 'check-replies');
 
 const BOUNCE_FROM = /mailer-daemon|postmaster|mail delivery (subsystem|system)|microsoftexchange|bounce/i;
 const BOUNCE_SUBJECT = /delivery status notification|undeliver|delivery (has )?failed|failure notice|returned mail|could not be delivered|mail delivery failed|delivery incomplete|message not delivered|address not found/i;
@@ -132,7 +134,8 @@ async function run() {
         if (isLegacy) {
           // Marked "replied" before, but nothing real is in the thread —
           // put it back in the sequence where it left off.
-          await supabase.from('leads').update({ status: 'contacted', reply_kind: kind || 'none' }).eq('id', lead.id);
+          const { error: restoreErr } = await supabase.from('leads').update({ status: 'contacted', reply_kind: kind || 'none' }).eq('id', lead.id);
+          if (restoreErr) throw new Error(restoreErr.message);
           tally.restored++;
         }
         continue;
@@ -156,16 +159,20 @@ async function run() {
       console.log(`check-replies: ${lead.business_name} → ${kind}`);
     } catch (err) {
       console.error(`check-replies: failed checking ${lead.business_name}: ${err.message}`);
+      runLog.error(`${lead.business_name} (${lead.id})`, err);
     }
   }
 
-  console.log(
-    `check-replies: checked ${leads.length} threads. Real replies: ${tally.reply}. Unsubscribes: ${tally.unsubscribe}. ` +
-      `Bounces: ${tally.bounce}. Auto-replies ignored: ${tally.auto}. Old "replied" leads put back in sequence: ${tally.restored}.`
-  );
+  const summary =
+    `checked ${leads.length} threads. Real replies: ${tally.reply}. Unsubscribes: ${tally.unsubscribe}. ` +
+      `Bounces: ${tally.bounce}. Auto-replies ignored: ${tally.auto}. Old "replied" leads put back in sequence: ${tally.restored}.`;
+  console.log(`check-replies: ${summary}`);
+  await runLog.finish(summary);
 }
 
-run().catch((err) => {
+run().catch(async (err) => {
   console.error('check-replies failed:', err);
+  runLog.error('run', err);
+  await runLog.finish('run failed');
   process.exit(1);
 });
