@@ -132,7 +132,7 @@ async function fetchWhere(layerId, outFields, where) {
 // ---------- normalizing ----------
 
 const clean = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
-const norm = (v) => clean(v).toUpperCase().replace(/[^A-Z0-9 ]/g, "").replace(/\s+/g, " ");
+const norm = (v) => clean(v).toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim(); // punctuation → space, so "D.,INC." still reads as INC
 const blocklotKey = (v) => norm(v).replace(/ /g, "");
 
 // SALEDATE is an 8-character string. Handles YYYYMMDD or MMDDYYYY.
@@ -153,7 +153,7 @@ const INSTITUTION = /\b(MAYOR AND CITY COUNCIL|CITY OF BALTIMORE|HOUSING AUTHORI
 // Extra exclusions for the BUYERS list only: nonprofits, public bodies,
 // and lender/foreclosure-trust entities buy lots of property but are
 // never a wholesaler's end buyer.
-const NOT_A_BUYER = /\b(HABITAT|HOUSING SERVICES|NEIGHBORHOOD HOUSING|NONPROFIT|NON PROFIT|COMMUNITY LAND TRUST|CDC|HUMANITY|RAILROAD|NATIONAL RAILROAD|AMTRAK|FUNDING TRUST|REO|UNIVERSITY|COLLEGE|HOSPITAL|HEALTH SYSTEM|AUTHORITY|COMMUNITY DEVELOPMENT CORP|FOUNDATION|LAND BANK|REDEVELOPMENT AUTHORITY|SCHOOL|SYNAGOGUE|MOSQUE|TEMPLE|DIOCESE|ARCHDIOCESE|UTILITY|BGE|VERIZON|SERVICER|LENDING|LOANS?|FINANCIAL|CREDIT UNION|TITLE)\b/;
+const NOT_A_BUYER = /\b(HABITAT|HOUSING SERVICES|NEIGHBORHOOD HOUSING|NONPROFIT|NON PROFIT|COMMUNITY LAND TRUST|CDC|HUMANITY|RAILROAD|NATIONAL RAILROAD|AMTRAK|FUNDING|REO|UNIVERSITY|COLLEGE|HOSPITAL|HEALTH SYSTEM|AUTHORITY|COMMUNITY DEVELOPMENT CORP|FOUNDATION|LAND BANK|REDEVELOPMENT AUTHORITY|SCHOOL|SYNAGOGUE|MOSQUE|TEMPLE|DIOCESE|ARCHDIOCESE|UTILITY|BGE|VERIZON|SERVICER|LENDING|LOANS?|FINANCIAL|CREDIT UNION|TITLE)\b/;
 
 function isAbsentee(propertyAddr, mailing) {
   const p = norm(propertyAddr);
