@@ -104,7 +104,7 @@ async function fetchRecentReplies() {
   const since = new Date(Date.now() - 4 * 86400000).toISOString();
   const { data, error } = await supabase
     .from('leads')
-    .select('business_name, email, phone, category, replied_at')
+    .select('business_name, email, phone, category, replied_at, reply_from, reply_subject, reply_snippet')
     .eq('reply_kind', 'reply')
     .gte('replied_at', since)
     .order('replied_at', { ascending: false });
@@ -206,18 +206,25 @@ function renderCallRow(lead) {
     </td></tr>`;
 }
 
+function decodeEntities(t) {
+  return String(t || '').replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
 function renderReplyRow(lead) {
+  // Show just their words, not the quoted copy of our email.
+  const said = decodeEntities(lead.reply_snippet).split(/\bOn [A-Z][a-z]{2},? .{0,80}wrote:/)[0].trim();
   return `
     <tr><td style="padding:9px 0; border-bottom:1px solid #2c3143;">
       <div style="font-size:15px; font-weight:600; color:#e9e7df;">${escapeHTML(lead.business_name)}</div>
-      <div style="font-family:monospace; font-size:11px; color:#8b93a7; margin-top:3px;">${escapeHTML(lead.email || '')} ${escapeHTML(lead.phone || '')}</div>
+      <div style="font-family:monospace; font-size:11px; color:#8b93a7; margin-top:3px;">From ${escapeHTML(lead.reply_from || lead.email || '')}${lead.phone ? ` · ${escapeHTML(lead.phone)}` : ''}</div>
+      ${said ? `<div style="font-size:13px; color:#e9e7df; margin-top:5px; padding-left:10px; border-left:2px solid #CDB07A;">"${escapeHTML(said.slice(0, 300))}"</div>` : ''}
     </td></tr>`;
 }
 
 function renderDigestHTML({ pages, callList, replies, callResults = [], realEstate = null }) {
   const parts = [];
   if (callResults.length) parts.push(section(`FROM THE AI CALLS (${callResults.length})`, `<table width="100%" cellpadding="0" cellspacing="0">${callResults.map(renderCallResultRow).join('')}</table><div style="font-size:12px; color:#8b93a7; margin-top:8px;">These people talked to the AI caller and want to hear from you. Call them back today.</div>`));
-  if (replies.length) parts.push(section(`REPLIES WAITING (${replies.length})`, `<table width="100%" cellpadding="0" cellspacing="0">${replies.map(renderReplyRow).join('')}</table><div style="font-size:12px; color:#8b93a7; margin-top:8px;">These are real people who wrote back. Answer them in the Wade Capital Gmail today.</div>`));
+  if (replies.length) parts.push(section(`REPLIES WAITING (${replies.length})`, `<table width="100%" cellpadding="0" cellspacing="0">${replies.map(renderReplyRow).join('')}</table><div style="font-size:12px; color:#8b93a7; margin-top:8px;">These are real people who wrote back to wadecapitallc@gmail.com. Answer them there today.</div>`));
   if (callList.length) parts.push(section(`TODAY'S CALL LIST (${callList.length})`, `<table width="100%" cellpadding="0" cellspacing="0">${callList.map(renderCallRow).join('')}</table><div style="font-size:12px; color:#8b93a7; margin-top:8px;">Opener: "Hi, this is Deven with Wade Capital. I help local businesses with their websites. Who handles that for you?" Tap a number to call.</div>`));
   if (pages.length) parts.push(section(`NEW LEADS CAPTURED (${pages.length})`, `<table width="100%" cellpadding="0" cellspacing="0">${pages.map(renderRow).join('')}</table>`));
   if (realEstate) parts.push(section('REAL ESTATE: BALTIMORE (WEEKLY)', renderRealEstate(realEstate)));
