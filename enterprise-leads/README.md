@@ -1,5 +1,12 @@
 # Enterprise Leads
 
+> **Channels v3 (Sept 30, 2026)**
+> - **No approval step.** Every email sends on its own. The Notion "Approve" checkbox is no longer used.
+> - **AI phone calls** (`ingest/bland-calls.js`, `.github/workflows/bland-calls.yml`). Bland AI calls business landlines only (screened by Twilio in `phone-screen.js`), Tue–Thu 10am–4pm ET, within `settings.phone_calls.monthly_budget_usd`. No-website businesses go first. The agent says it's an AI and that the call may be recorded. Emails captured on calls get the `after_call` mockup email the next morning. "Don't call" is permanent (`do_not_call`). Needs the `BLAND_API_KEY` secret, plus `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` for screening.
+> - **Live demo sites.** `preview.html` on the Wade Capital site shows the business's Google photos (credited), hours and map when `GOOGLE_BROWSER_KEY` is set in that file. Google doesn't allow copying photos or hours, so they're loaded live from Google on each view. Leads now store `google_place_id`.
+> - **Real estate buyers → email.** `real-estate/buyers-to-leads.mjs` (weekly, after the Baltimore pull) finds the most active cash buyers on Google and adds matches as `product: real_estate`, `need_type: buyer_intro` leads, which the normal email pipeline then works. Owner data now comes from Baltimore's live property service (CityView).
+> - The digest adds "From the AI calls" and, on Mondays, a Baltimore real estate section.
+
 > **Outreach v2 (Sept 2026): what changed**
 > - **Emails send automatically.** The "draft, then you send it" step is gone. An old draft that is still sitting in Gmail was never sent, so it is deleted and replaced with the new email. If you already sent it, the lead just moves forward. Nobody gets two copies.
 > - **Bad addresses are blocked before sending.** Template placeholders (user@domain.com, hi@mystore.com) and domains with no mail server are rejected (`ingest/lib/email-quality.js`).

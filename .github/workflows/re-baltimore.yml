@@ -2,7 +2,8 @@ name: Real Estate — Baltimore City Lists
 
 # Weekly: rebuilds the Baltimore motivated-seller list (re_properties)
 # and cash-buyer list (re_buyers) from the city's free open data.
-# It only builds lists — it never contacts anyone.
+# Step 2 (buyers-to-leads) finds the most active cash buyers' websites
+# and adds them to the email pipeline as real-estate investor leads.
 on:
   schedule:
     - cron: '23 13 * * 0' # ~9:23am ET every Sunday (off the round minute to avoid cron congestion)
@@ -25,3 +26,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      - run: npm run re-buyers
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}

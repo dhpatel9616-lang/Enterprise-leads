@@ -56,7 +56,7 @@ async function saveRunLog(summary, errors = []) {
 }
 
 const DAY = 86400000;
-const NOW = Date.now();
+const NOW = Date.now(); // also the run's start time, used for pruning
 
 // ---------- fetching ----------
 
@@ -150,6 +150,10 @@ const ENTITY = /\b(LLC|L L C|INC|CORP|CORPORATION|COMPANY|CO|LP|LLP|LTD|TRUST|TR
 // Owners we can't buy from directly (government, lenders, agencies) —
 // their properties go through auctions/REO desks, not a seller letter.
 const INSTITUTION = /\b(MAYOR AND CITY COUNCIL|CITY OF BALTIMORE|HOUSING AUTHORITY|STATE OF MARYLAND|SECRETARY OF|UNITED STATES|FEDERAL NATIONAL|FEDERAL HOME LOAN|FANNIE MAE|FREDDIE MAC|BANK|MORTGAGE|LOAN SERVICING|WELLS FARGO|U S BANK|US BANK|DEUTSCHE|WILMINGTON|NATIONSTAR|HUD|CHURCH|MINISTR|BOARD OF EDUCATION)\b/;
+// Extra exclusions for the BUYERS list only: nonprofits, public bodies,
+// and lender/foreclosure-trust entities buy lots of property but are
+// never a wholesaler's end buyer.
+const NOT_A_BUYER = /\b(HABITAT|HUMANITY|RAILROAD|NATIONAL RAILROAD|AMTRAK|FUNDING TRUST|REO|UNIVERSITY|COLLEGE|HOSPITAL|HEALTH SYSTEM|AUTHORITY|COMMUNITY DEVELOPMENT CORP|FOUNDATION|LAND BANK|REDEVELOPMENT AUTHORITY|SCHOOL|SYNAGOGUE|MOSQUE|TEMPLE|DIOCESE|ARCHDIOCESE|UTILITY|BGE|VERIZON|SERVICER|LENDING|LOANS?|FINANCIAL|CREDIT UNION|TITLE)\b/;
 
 function isAbsentee(propertyAddr, mailing) {
   const p = norm(propertyAddr);
@@ -331,7 +335,7 @@ async function main() {
   for (const p of salesRows) {
     const owner = clean(p.OWNER_1);
     const ownerAll = norm(`${p.OWNER_1 || ""} ${p.OWNER_2 || ""}`);
-    if (!owner || !ENTITY.test(ownerAll) || INSTITUTION.test(ownerAll)) continue;
+    if (!owner || !ENTITY.test(ownerAll) || INSTITUTION.test(ownerAll) || NOT_A_BUYER.test(ownerAll)) continue;
     const d = parseSaleDate(p.SALEDATE);
     if (!d || NOW - d.getTime() > 730 * DAY) continue;
     const price = p.SALEPRIC;
@@ -389,7 +393,19 @@ async function main() {
     const { error } = await supabase.from("re_buyers").upsert(buyers.slice(i, i + 500), { onConflict: "owner_key" });
     if (error) throw new Error(`re_buyers upsert failed: ${error.message}`);
   }
-  const summary = `vacancy notices ${vacants.length}, foreclosure filings ${foreclosures.length} (newest ${fcDates[0] ? toISODate(fcDates[0]) : "none"}), flagged parcels found ${parcels.length}, sales rows ${salesRows.length}, parcel matches ${properties.filter((p) => p.owner_1).length}; saved ${properties.length} properties (${properties.filter((p) => p.score >= 6).length} scoring 6+) and ${buyers.length} buyers`;
+  // Drop rows that are no longer on the city's lists (notice closed,
+  // sold, now institution-owned) — but only if this run clearly worked,
+  // and never rows you've started working (status other than 'new').
+  let pruned = 0;
+  if (properties.length > 1000 && properties.filter((p) => p.owner_1).length > properties.length * 0.5) {
+    const cutoff = new Date(NOW - 60 * 60 * 1000).toISOString();
+    const { count, error } = await supabase.from("re_properties").delete({ count: "exact" }).eq("market", MARKET).eq("status", "new").lt("last_seen", cutoff);
+    if (error) console.error(`prune failed: ${error.message}`);
+    pruned = count || 0;
+    const res2 = await supabase.from("re_buyers").delete().eq("market", MARKET).eq("status", "new").is("lead_id", null).lt("last_seen", cutoff);
+    if (res2.error) console.error(`buyer prune failed: ${res2.error.message}`);
+  }
+  const summary = `vacancy notices ${vacants.length}, foreclosure filings ${foreclosures.length} (newest ${fcDates[0] ? toISODate(fcDates[0]) : "none"}), flagged parcels found ${parcels.length}, sales rows ${salesRows.length}, parcel matches ${properties.filter((p) => p.owner_1).length}; saved ${properties.length} properties (${properties.filter((p) => p.score >= 6).length} scoring 6+) and ${buyers.length} buyers; removed ${pruned} stale properties`;
   console.log(`\nbaltimore-pull: ${summary}`);
   await saveRunLog(summary);
 }

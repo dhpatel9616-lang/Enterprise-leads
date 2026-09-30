@@ -196,7 +196,7 @@ async function createLeadPage({ businessName, phone, siteUrl, hasSite, hasSsl, m
   return data.id;
 }
 
-async function mirrorToSupabase({ businessName, category, phone, email, siteUrl, hasSsl, mobileOk, hasSocial, needType, notionPageId, address, locationName }) {
+async function mirrorToSupabase({ businessName, category, phone, email, siteUrl, hasSsl, mobileOk, hasSocial, needType, notionPageId, address, locationName, placeId }) {
   // `.eq('site_url', null)` never matches in SQL, so businesses with no
   // website used to slip past this duplicate check — use .is() for null.
   let dupeQuery = supabase.from('leads').select('id').eq('business_name', businessName);
@@ -223,6 +223,7 @@ async function mirrorToSupabase({ businessName, category, phone, email, siteUrl,
     notion_page_id: notionPageId,
     address: address || null,
     location_name: locationName || null,
+    google_place_id: placeId || null, // storing the place ID is allowed by Google's terms; the preview page uses it for live photos/hours
   });
   if (error) console.error(`notion-leads-ingest: Supabase insert failed for ${businessName}: ${error.message}`);
 }

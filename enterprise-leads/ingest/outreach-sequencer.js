@@ -107,7 +107,10 @@ function issueLine(lead) {
 }
 
 function previewUrl(lead) {
-  return buildPreviewUrl(lead, config.preview_base_url);
+  // After a phone call we promised a sample site even if they have an
+  // old website, so build the mockup link regardless.
+  const forLink = lead.email_enrichment_result === 'from_call' ? { ...lead, site_url: null } : lead;
+  return buildPreviewUrl(forLink, config.preview_base_url);
 }
 
 function followupsFor(lead) {
@@ -127,6 +130,10 @@ function maxSteps() {
 
 function touchForStep(lead, step) {
   if (step === 1) {
+    // They gave us this email on an AI call and asked for the mockup.
+    if (lead.email_enrichment_result === 'from_call' && config.touch_sets.after_call) {
+      return config.touch_sets.after_call[0];
+    }
     if (!lead.site_url && config.preview_base_url && config.touch_sets.no_website && !NO_MOCKUP_NEED_TYPES.includes(lead.need_type)) {
       return config.touch_sets.no_website[0];
     }

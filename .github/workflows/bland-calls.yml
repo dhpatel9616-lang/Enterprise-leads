@@ -1,0 +1,29 @@
+name: Enterprise Leads — AI Phone Calls
+
+# Collects results from earlier calls, then (Tue-Thu, 10am-4pm ET only,
+# within the monthly budget in settings.phone_calls) places new calls to
+# screened business landlines. See enterprise-leads/ingest/bland-calls.js.
+on:
+  schedule:
+    - cron: '47 14 * * 1-5' # ~10:47am ET weekdays
+    - cron: '17 19 * * 1-5' # ~3:17pm ET weekdays
+  workflow_dispatch: {}
+
+jobs:
+  calls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: "enterprise-leads"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run calls
+        env:
+          BLAND_API_KEY: ${{ secrets.BLAND_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

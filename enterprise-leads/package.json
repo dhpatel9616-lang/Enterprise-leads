@@ -11,7 +11,9 @@
     "check-replies": "node ingest/check-replies.js",
     "enrich": "node ingest/enrich-emails.mjs",
     "phone-screen": "node ingest/phone-screen.js",
-    "re-baltimore": "node real-estate/baltimore-pull.mjs"
+    "re-baltimore": "node real-estate/baltimore-pull.mjs",
+    "re-buyers": "node real-estate/buyers-to-leads.mjs",
+    "calls": "node ingest/bland-calls.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

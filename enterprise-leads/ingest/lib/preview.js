@@ -5,6 +5,9 @@
 function previewUrl(lead, baseUrl) {
   if (!baseUrl || lead.site_url) return null;
   const payload = { n: lead.business_name, c: lead.category || '', p: lead.phone || '', a: lead.address || '' };
+  // Google place ID lets the page load the business's real photos, hours
+  // and map live from Google (Google doesn't allow copying those).
+  if (lead.google_place_id) payload.i = lead.google_place_id;
   return `${baseUrl}?d=${Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url')}`;
 }
 

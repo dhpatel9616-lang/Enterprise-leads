@@ -74,6 +74,10 @@ async function run() {
     .select('id, phone')
     .is('phone_type', null)
     .not('phone', 'is', null)
+    .neq('product', 'real_estate')
+    // Businesses with no website first: they're the AI caller's first targets.
+    .order('site_url', { ascending: true, nullsFirst: true })
+    .order('created_at', { ascending: true })
     .limit(maxPerRun);
 
   if (error) throw new Error(`Failed to load leads: ${error.message}`);
