@@ -106,11 +106,16 @@ function issueLine(lead) {
   return 'could use a refresh';
 }
 
+// Website pitches carry a mockup link: a sample site built from the
+// business's Google listing. Sent to businesses with no site AND to ones
+// whose site needs work (a concrete sample gets far more replies than
+// "want me to send a mockup?"). Also after an AI call, where we promised one.
+const MOCKUP_NEED_TYPES = ['website', 'both'];
+
 function previewUrl(lead) {
-  // After a phone call we promised a sample site even if they have an
-  // old website, so build the mockup link regardless.
-  const forLink = lead.email_enrichment_result === 'from_call' ? { ...lead, site_url: null } : lead;
-  return buildPreviewUrl(forLink, config.preview_base_url);
+  const wantsMockup = MOCKUP_NEED_TYPES.includes(lead.need_type) || lead.email_enrichment_result === 'from_call' || !lead.site_url;
+  if (!wantsMockup || NO_MOCKUP_NEED_TYPES.includes(lead.need_type)) return null;
+  return buildPreviewUrl({ ...lead, site_url: null }, config.preview_base_url);
 }
 
 function followupsFor(lead) {
@@ -237,6 +242,8 @@ function buildMessage(lead, nextStep) {
     offer_phrase: OFFER_PHRASES[lead.need_type] || OFFER_PHRASES.website,
     context: lead.outreach_context ? `${lead.outreach_context} ` : '',
     preview_url: previewUrl(lead) || '',
+    // For follow-ups: repeats the mockup link where there is one, else nothing.
+    mockup_line: previewUrl(lead) ? `\n\nHere's the sample site I made for ${lead.business_name} again: ${previewUrl(lead)}` : '',
     site_url: lead.site_url || '',
   };
   // Follow-ups reuse the FIRST email's subject ("Re: ...") so Gmail keeps

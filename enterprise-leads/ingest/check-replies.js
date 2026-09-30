@@ -40,6 +40,10 @@ const runLog = createRunLog(supabase, 'check-replies');
 
 const BOUNCE_FROM = /mailer-daemon|postmaster|mail delivery (subsystem|system)|microsoftexchange|bounce/i;
 const BOUNCE_SUBJECT = /delivery status notification|undeliver|delivery (has )?failed|failure notice|returned mail|could not be delivered|mail delivery failed|delivery incomplete|message not delivered|address not found/i;
+// Temporary "still trying to deliver" notices are not bounces.
+const DELAY_NOTICE = /\(delay\)|delivery (is )?delayed|temporary problem delivering|will retry/i;
+// Auto-responders that don't say so in the subject (e.g. "After Hours Message").
+const AUTO_TEXT = /after[- ]hours|outside (of )?(our )?(normal |regular )?business hours|this is an automated|automated (response|reply|message)|do not reply to this|you'?ve reached us|we('ll| will) (get back|respond|reply) to you (as soon|shortly|within)|thanks? for (your email|contacting|reaching out)[^.]{0,60}(we|our team) (will|'ll)|ticket (number|#)|case (number|#)/i;
 const AUTO_SUBJECT = /out of (the )?office|automatic reply|auto(matic)?[- ]?reply|autoreply|away from (my|the) (desk|office)|on vacation|thank you for (your email|contacting|reaching out)|we (have )?received your (message|email)/i;
 const UNSUB_TEXT = /\bunsubscribe\b|remove me|take me off|stop (emailing|contacting)|do not (email|contact)|don'?t (email|contact)|not interested|no thanks|no thank you/i;
 
@@ -52,9 +56,10 @@ function classify(message) {
   const subject = header(message, 'Subject');
   const autoSubmitted = header(message, 'Auto-Submitted');
   const snippet = message.snippet || '';
+  if (DELAY_NOTICE.test(subject) || DELAY_NOTICE.test(snippet)) return 'auto';
   if (BOUNCE_FROM.test(from) || BOUNCE_SUBJECT.test(subject)) return 'bounce';
   if (UNSUB_TEXT.test(snippet) || UNSUB_TEXT.test(subject)) return 'unsubscribe';
-  if ((autoSubmitted && autoSubmitted.toLowerCase() !== 'no') || AUTO_SUBJECT.test(subject)) return 'auto';
+  if ((autoSubmitted && autoSubmitted.toLowerCase() !== 'no') || AUTO_SUBJECT.test(subject) || AUTO_TEXT.test(snippet)) return 'auto';
   return 'reply';
 }
 
