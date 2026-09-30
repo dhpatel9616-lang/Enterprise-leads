@@ -12,7 +12,6 @@ const { loadSetting } = require('./lib/settings');
 const { previewUrl } = require('./lib/preview');
 const { createRunLog } = require('./lib/run-log');
 let previewBase = null; // from settings.outreach.preview_base_url
-const runLog = supabase ? createRunLog(supabase, 'send-leads-digest') : { error() {}, async finish() {} };
 
 const RESEND_KEY = process.env.RESEND_API_KEY;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
@@ -22,6 +21,7 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const NOTION_VERSION = '2022-06-28';
 
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY) : null;
+const runLog = supabase ? createRunLog(supabase, 'send-leads-digest') : { error() {}, async finish() {} };
 let digestConfig; // loaded from Supabase settings table at the start of run()
 
 async function fetchLeads() {
@@ -295,7 +295,9 @@ async function run() {
   console.log(`send-leads-digest: sent (${replies.length} replies, ${callList.length} calls, ${pages.length} new leads).`);
 }
 
-run().catch((err) => {
+run().catch(async (err) => {
   console.error('send-leads-digest failed:', err);
+  runLog.error('run', err);
+  await runLog.finish('run failed');
   process.exit(1);
 });
