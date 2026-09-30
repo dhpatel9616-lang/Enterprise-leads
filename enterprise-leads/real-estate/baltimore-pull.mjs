@@ -398,7 +398,7 @@ async function main() {
   // and never rows you've started working (status other than 'new').
   let pruned = 0;
   if (properties.length > 1000 && properties.filter((p) => p.owner_1).length > properties.length * 0.5) {
-    const cutoff = new Date(NOW - 60 * 60 * 1000).toISOString();
+    const cutoff = new Date(NOW).toISOString(); // everything this run saved has a later last_seen
     const { count, error } = await supabase.from("re_properties").delete({ count: "exact" }).eq("market", MARKET).eq("status", "new").lt("last_seen", cutoff);
     if (error) console.error(`prune failed: ${error.message}`);
     pruned = count || 0;

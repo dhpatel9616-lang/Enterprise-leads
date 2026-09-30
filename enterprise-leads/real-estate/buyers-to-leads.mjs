@@ -43,13 +43,29 @@ const tokens = (s) =>
     .split(/\s+/)
     .filter((t) => t.length > 1 && !FILLER.has(t));
 
-// A Google result counts as the same company only if every distinctive
-// word of the owner name appears in the listing's name (at least one).
+// A Google result counts as the same company only when:
+//   1. the distinctive words match BOTH ways ("REBIRTH DEVELOPMENT LLC"
+//      must not match "Sacred Rebirth"; "GARZA HOLDINGS" must not match
+//      "Garza Contractors"), and
+//   2. the listing is in the same state as the owner's mailing address
+//      (Baltimore records show in-state addresses as just a ZIP → MD).
+// A wrong match means emailing a stranger, so when unsure it says no.
 function isMatch(ownerName, listingName) {
-  const want = tokens(ownerName);
-  if (want.length === 0) return false;
-  const have = new Set(tokens(listingName));
-  return want.every((t) => have.has(t));
+  const want = [...new Set(tokens(ownerName))];
+  const have = [...new Set(tokens(listingName))];
+  if (want.length === 0 || have.length === 0) return false;
+  return want.length === have.length && want.every((t) => have.includes(t));
+}
+
+function stateOf(address, fallback = null) {
+  const m = /,\s*([A-Z]{2})[, ]+\d{5}/.exec(String(address || "").toUpperCase());
+  return m ? m[1] : fallback;
+}
+
+function sameState(mailing, listingAddress) {
+  const owner = stateOf(mailing, /^\s*\d/.test(String(mailing || "")) ? "MD" : null);
+  const listing = stateOf(listingAddress);
+  return Boolean(owner && listing && owner === listing);
 }
 
 const titleCase = (s) => String(s || "").toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()).replace(/\bLlc\b/, "LLC").trim();
@@ -80,7 +96,7 @@ async function main() {
       break;
     }
     tally.searched++;
-    const hit = results.find((p) => isMatch(b.owner_name, p.displayName?.text));
+    const hit = results.find((p) => isMatch(b.owner_name, p.displayName?.text) && sameState(b.mailing_address, p.formattedAddress));
     let result = "no_match";
     let leadId = null;
 
