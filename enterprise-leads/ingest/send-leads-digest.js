@@ -10,7 +10,9 @@
 const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
 const { previewUrl } = require('./lib/preview');
+const { createRunLog } = require('./lib/run-log');
 let previewBase = null; // from settings.outreach.preview_base_url
+const runLog = supabase ? createRunLog(supabase, 'send-leads-digest') : { error() {}, async finish() {} };
 
 const RESEND_KEY = process.env.RESEND_API_KEY;
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
@@ -88,6 +90,7 @@ async function fetchCallList(limit) {
     .limit(300);
   if (error) {
     console.error(`send-leads-digest: call list query failed: ${error.message}`);
+    runLog.error('call list', error);
     return [];
   }
   const rows = data || [];
@@ -106,6 +109,7 @@ async function fetchRecentReplies() {
     .order('replied_at', { ascending: false });
   if (error) {
     console.error(`send-leads-digest: replies query failed: ${error.message}`);
+    runLog.error('replies', error);
     return [];
   }
   return data || [];
@@ -122,6 +126,7 @@ async function fetchCallResults() {
     .order('called_at', { ascending: false });
   if (error) {
     console.error(`send-leads-digest: call results query failed: ${error.message}`);
+    runLog.error('call results', error);
     return [];
   }
   return data || [];
@@ -258,6 +263,11 @@ async function run() {
   if (replies.length) subjectBits.push(`${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}`);
   subjectBits.push(`${callList.length} to call`);
   subjectBits.push(`${pages.length} new lead${pages.length === 1 ? '' : 's'}`);
+  if (process.env.DRY_RUN === '1') {
+    await runLog.finish(`[dry run, not sent] ${replies.length} replies, ${callList.length} to call, ${callResults.length} call results, ${pages.length} new leads${realEstate ? `, real estate: ${realEstate.hot} hot / ${realEstate.sellers.length} listed` : ''}`);
+    console.log('send-leads-digest: dry run, nothing sent.');
+    return;
+  }
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RESEND_KEY}` },
@@ -275,9 +285,13 @@ async function run() {
       .from('leads')
       .update({ call_listed_at: new Date().toISOString() })
       .in('id', callList.map((l) => l.id));
-    if (markErr) console.error(`send-leads-digest: couldn't mark call list rotation: ${markErr.message}`);
+    if (markErr) {
+      console.error(`send-leads-digest: couldn't mark call list rotation: ${markErr.message}`);
+      runLog.error('call list rotation', markErr);
+    }
   }
 
+  await runLog.finish(`sent: ${replies.length} replies, ${callList.length} to call, ${callResults.length} call results, ${pages.length} new leads${realEstate ? ', real estate section' : ''}`);
   console.log(`send-leads-digest: sent (${replies.length} replies, ${callList.length} calls, ${pages.length} new leads).`);
 }
 

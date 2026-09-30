@@ -3,7 +3,16 @@ name: Send Leads Digest
 on:
   schedule:
     - cron: '58 12 * * 1-5' # ~8:58am ET, Mon-Fri (staggered off :30 to avoid GH Actions cron congestion)
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the digest but don't send it"
+        type: boolean
+        default: false
+      include_real_estate:
+        description: "Include the weekly real estate section even if it isn't Monday"
+        type: boolean
+        default: false
 
 jobs:
   digest:
@@ -24,3 +33,5 @@ jobs:
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          FORCE_REAL_ESTATE: ${{ inputs.include_real_estate && '1' || '' }}
