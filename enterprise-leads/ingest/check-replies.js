@@ -61,16 +61,20 @@ function classify(message) {
 // Strongest signal wins: a human reply beats an auto-reply, etc.
 const RANK = { reply: 4, unsubscribe: 3, bounce: 2, auto: 1 };
 
+// Returns { kind, from, subject, snippet } for the strongest incoming
+// message in the thread, or { kind: null } if nothing came back.
 async function inspectThread(threadId, ownEmail) {
   const messages = await getThreadMessages(threadId);
-  let best = null;
+  let best = { kind: null };
   for (const m of messages) {
     if ((m.labelIds || []).includes('DRAFT')) continue;
     if (header(m, 'From').toLowerCase().includes(ownEmail.toLowerCase())) continue;
     const kind = classify(m);
-    if (!best || RANK[kind] > RANK[best]) best = kind;
+    if (!best.kind || RANK[kind] > RANK[best.kind]) {
+      best = { kind, from: header(m, 'From').slice(0, 200), subject: header(m, 'Subject').slice(0, 300), snippet: (m.snippet || '').slice(0, 500) };
+    }
   }
-  return best; // null = nothing came back
+  return best;
 }
 
 async function noteInNotion(lead, text) {
@@ -115,7 +119,17 @@ async function run() {
     .not('gmail_thread_id', 'is', null);
   if (legacyErr) throw legacyErr;
 
-  const leads = [...(active || []), ...(legacy || [])];
+  // Replies found before we started saving who sent them: re-read once so
+  // the digest can show the actual message.
+  const { data: noDetails, error: ndErr } = await supabase
+    .from('leads')
+    .select('*')
+    .eq('reply_kind', 'reply')
+    .is('reply_from', null)
+    .not('gmail_thread_id', 'is', null);
+  if (ndErr) throw ndErr;
+
+  const leads = [...(active || []), ...(legacy || []), ...(noDetails || [])];
   if (leads.length === 0) {
     console.log('check-replies: no leads with an active thread yet.');
     return;
@@ -128,7 +142,8 @@ async function run() {
     // Pace thread reads so a big batch stays under Gmail's per-minute limit.
     await new Promise((r) => setTimeout(r, 400));
     try {
-      const kind = await inspectThread(lead.gmail_thread_id, ownEmail);
+      const found = await inspectThread(lead.gmail_thread_id, ownEmail);
+      const kind = found.kind;
       const isLegacy = lead.status === 'replied';
 
       if (!kind || kind === 'auto') {
@@ -144,7 +159,11 @@ async function run() {
       }
 
       const outcome = OUTCOME[kind];
-      if (lead.status === outcome.status && lead.reply_kind === kind) continue;
+      const details = { reply_from: found.from || null, reply_subject: found.subject || null, reply_snippet: found.snippet || null };
+      if (lead.status === outcome.status && lead.reply_kind === kind) {
+        if (!lead.reply_from && details.reply_from) await supabase.from('leads').update(details).eq('id', lead.id);
+        continue;
+      }
 
       const { error: upErr } = await supabase.from('leads').update({
         status: outcome.status,
@@ -153,6 +172,7 @@ async function run() {
         gmail_draft_id: null,
         sequence_step: Math.max(lead.sequence_step, 1),
         last_contacted: lead.last_contacted || new Date().toISOString(),
+        ...details,
       }).eq('id', lead.id);
       if (upErr) throw new Error(upErr.message);
 
