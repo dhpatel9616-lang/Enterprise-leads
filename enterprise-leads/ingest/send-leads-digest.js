@@ -232,7 +232,9 @@ function renderDigestHTML({ pages, callList, replies, callResults = [], realEsta
 
 async function run() {
   if (!RESEND_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID || !supabase) {
-    console.log('send-leads-digest: one or more required secrets are missing. Skipping run.');
+    const missing = [['RESEND_API_KEY', RESEND_KEY], ['NOTION_TOKEN', NOTION_TOKEN], ['NOTION_DATABASE_ID', NOTION_DATABASE_ID], ['SUPABASE', supabase]].filter(([, v]) => !v).map(([k]) => k);
+    console.log(`send-leads-digest: missing secrets (${missing.join(', ')}). Skipping run.`);
+    await runLog.finish(`skipped: missing GitHub secrets ${missing.join(', ')}`);
     return;
   }
   digestConfig = await loadSetting(supabase, 'digest');
@@ -243,6 +245,7 @@ async function run() {
   }
   if (digestConfig.to_email.startsWith('YOUR_')) {
     console.log('send-leads-digest: settings.digest still has the placeholder to_email — skipping send.');
+    await runLog.finish('skipped: placeholder to_email');
     return;
   }
 
@@ -254,6 +257,7 @@ async function run() {
   const realEstate = isMonday || process.env.FORCE_REAL_ESTATE === '1' ? await fetchRealEstate().catch(() => null) : null;
   if (pages.length === 0 && callList.length === 0 && replies.length === 0 && callResults.length === 0 && !realEstate) {
     console.log('send-leads-digest: nothing to send today.');
+    await runLog.finish('skipped: nothing to send');
     return;
   }
 
