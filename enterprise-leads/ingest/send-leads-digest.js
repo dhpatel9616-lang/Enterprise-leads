@@ -11,6 +11,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
 const { previewUrl } = require('./lib/preview');
 const { createRunLog } = require('./lib/run-log');
+const { sendGmail } = require('./lib/gmail');
 let previewBase = null; // from settings.outreach.preview_base_url
 
 const RESEND_KEY = process.env.RESEND_API_KEY;
@@ -231,8 +232,11 @@ function renderDigestHTML({ pages, callList, replies, callResults = [], realEsta
 }
 
 async function run() {
-  if (!RESEND_KEY || !NOTION_TOKEN || !NOTION_DATABASE_ID || !supabase) {
-    const missing = [['RESEND_API_KEY', RESEND_KEY], ['NOTION_TOKEN', NOTION_TOKEN], ['NOTION_DATABASE_ID', NOTION_DATABASE_ID], ['SUPABASE', supabase]].filter(([, v]) => !v).map(([k]) => k);
+  // Sends through Resend if a key exists, otherwise through the same
+  // Wade Capital Gmail account the outreach uses (no extra account needed).
+  const HAS_GMAIL = Boolean(process.env.GMAIL_CLIENT_ID && process.env.GMAIL_REFRESH_TOKEN);
+  if ((!RESEND_KEY && !HAS_GMAIL) || !NOTION_TOKEN || !NOTION_DATABASE_ID || !supabase) {
+    const missing = [['RESEND_API_KEY or GMAIL_*', RESEND_KEY || HAS_GMAIL], ['NOTION_TOKEN', NOTION_TOKEN], ['NOTION_DATABASE_ID', NOTION_DATABASE_ID], ['SUPABASE', supabase]].filter(([, v]) => !v).map(([k]) => k);
     console.log(`send-leads-digest: missing secrets (${missing.join(', ')}). Skipping run.`);
     await runLog.finish(`skipped: missing GitHub secrets ${missing.join(', ')}`);
     return;
@@ -272,17 +276,17 @@ async function run() {
     console.log('send-leads-digest: dry run, nothing sent.');
     return;
   }
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RESEND_KEY}` },
-    body: JSON.stringify({
-      from: digestConfig.from_email,
-      to: digestConfig.to_email,
-      subject: `${digestConfig.subject_prefix} ${subjectBits.join(', ')}`,
-      html,
-    }),
-  });
-  if (!res.ok) throw new Error(`Resend API ${res.status}: ${await res.text()}`);
+  const subject = `${digestConfig.subject_prefix} ${subjectBits.join(', ')}`;
+  if (RESEND_KEY) {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RESEND_KEY}` },
+      body: JSON.stringify({ from: digestConfig.from_email, to: digestConfig.to_email, subject, html }),
+    });
+    if (!res.ok) throw new Error(`Resend API ${res.status}: ${await res.text()}`);
+  } else {
+    await sendGmail({ to: digestConfig.to_email, subject, html });
+  }
 
   if (callList.length) {
     const { error: markErr } = await supabase
