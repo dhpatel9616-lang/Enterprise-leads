@@ -27,7 +27,11 @@ import { createClient } from "@supabase/supabase-js";
 import { writeFileSync } from "node:fs";
 
 const BASE = "https://egisdata.baltimorecity.gov/egis/rest/services/Housing/DHCD_Open_Baltimore_Datasets/FeatureServer";
-const LAYER = { vacants: 1, foreclosures: 11, property: 12 };
+// Parcel owners/sales come from the city's live property service. The
+// "Real Property" layer (12) in the DHCD service above returns no rows
+// for any query (confirmed Sept 29, 2026), so it isn't used.
+const PROPERTY_URL = "https://geodata.baltimorecity.gov/egis/rest/services/CityView/Realproperty_OB/FeatureServer/0";
+const LAYER = { vacants: 1, foreclosures: 11, property: PROPERTY_URL };
 const MARKET = "baltimore_city";
 
 const OUTPUT_JSON = process.env.OUTPUT_JSON;
@@ -106,7 +110,7 @@ async function fetchAll(layerId, outFields, where = "1=1") {
 // server's 1,000-row cap was reached and the slice should be narrower.
 async function fetchWhere(layerId, outFields, where) {
   const params = new URLSearchParams({ where, outFields: outFields.join(","), returnGeometry: "false", f: "json" });
-  const url = `${BASE}/${layerId}/query`;
+  const url = typeof layerId === "string" ? `${layerId}/query` : `${BASE}/${layerId}/query`;
   // POST keeps long IN (...) lists safely under URL length limits.
   let data;
   for (let attempt = 1; ; attempt++) {
@@ -194,13 +198,19 @@ async function main() {
     d.setUTCMonth(d.getUTCMonth() - back);
     const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
     const yyyy = d.getUTCFullYear();
-    const { rows, hitLimit } = await fetchWhere(
-      LAYER.property,
-      PARCEL_FIELDS,
-      `SALEPRIC >= 10000 AND SALEPRIC <= 400000 AND (SALEDATE LIKE '${mm}__${yyyy}' OR SALEDATE LIKE '${yyyy}${mm}__')`
-    );
+    const dateClause = `(SALEDATE LIKE '${mm}__${yyyy}' OR SALEDATE LIKE '${yyyy}${mm}__')`;
+    // One query per month; if a month hits the server's 1,000-row cap,
+    // split it into price bands so no sales are silently dropped.
+    let { rows, hitLimit } = await fetchWhere(LAYER.property, PARCEL_FIELDS, `SALEPRIC >= 10000 AND SALEPRIC <= 400000 AND ${dateClause}`);
+    if (hitLimit) {
+      rows = [];
+      for (const [lo, hi] of [[10000, 60000], [60001, 120000], [120001, 200000], [200001, 400000]]) {
+        const band = await fetchWhere(LAYER.property, PARCEL_FIELDS, `SALEPRIC >= ${lo} AND SALEPRIC <= ${hi} AND ${dateClause}`);
+        rows.push(...band.rows);
+        if (band.hitLimit) cappedMonths.push(`${yyyy}-${mm} $${lo}-${hi}`);
+      }
+    }
     salesRows.push(...rows);
-    if (hitLimit) cappedMonths.push(`${yyyy}-${mm}`);
   }
   diag.salesRows = salesRows.length;
   diag.cappedMonths = cappedMonths;
@@ -208,6 +218,11 @@ async function main() {
 
   const parcelByBL = new Map();
   for (const p of parcels) if (p.BLOCKLOT) parcelByBL.set(blocklotKey(p.BLOCKLOT), p);
+  if (wanted.length > 500 && parcels.length < wanted.length * 0.2) {
+    // Guard: if the owner lookup mostly failed, say so loudly instead of
+    // quietly saving a list with no owners.
+    console.log(`  WARNING: only ${parcels.length} of ${wanted.length} flagged parcels matched a property record.`);
+  }
 
   // ----- motivated-seller signals -----
   const signalsByBL = new Map();

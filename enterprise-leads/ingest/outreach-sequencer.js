@@ -21,10 +21,9 @@
  *      mailing address (U.S. CAN-SPAM Act). The address lives only in the
  *      private `business_mailing_address` settings row (a JSON string),
  *      never in this public repo. If it isn't set, NOTHING sends.
- *   5. Optional approval gate: set `require_notion_approval: true` in
- *      settings.outreach and first emails wait until the lead's
- *      "Approve" checkbox is ticked in Notion (the email preview is
- *      written to its "Drafted Message" field). Off by default.
+ *   5. No approval step: every email sends on its own (Sept 30, 2026,
+ *      at Deven's request). Notion still gets a copy of each first email
+ *      in "Drafted Message" as a record, but nothing waits on it.
  *
  * Which email a lead gets:
  *   - touch 1 is picked by need_type (settings.outreach.touch_sets).
@@ -33,9 +32,10 @@
  *     a site for their business (see preview.html on the Wade Capital
  *     site). Otherwise they get the regular `website` touch.
  *   - touches 2+ are shared follow-ups (settings.outreach.followups),
- *     except website/social/both leads switch to the Automation
- *     Readiness Audit pitch (settings.outreach.automation_pivot) from
- *     `start_step` on.
+ *     unless settings.outreach.followup_sets has a list for that
+ *     need_type (e.g. `buyer_intro` for real estate investors), and
+ *     website/social/both leads switch to the Automation Readiness Audit
+ *     pitch (settings.outreach.automation_pivot) from `start_step` on.
  *
  * Requires SUPABASE_URL, SUPABASE_SERVICE_KEY, GMAIL_CLIENT_ID,
  * GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN. No-ops safely if missing.
@@ -75,11 +75,15 @@ const OFFER_PHRASES = {
   reciprocal_link: 'a reciprocal link',
   research_contact: 'GlobalAggregate as a research tool',
   governance_audit: 'the AI Governance Readiness Audit',
+  buyer_intro: 'off-market Baltimore deals',
 };
 
 // Wade Capital service pitches to businesses: the only emails that carry
 // the mailing address (GlobalAggregate researcher/link outreach does not).
-const BUSINESS_NEED_TYPES = ['website', 'social', 'both', 'governance_audit'];
+const BUSINESS_NEED_TYPES = ['website', 'social', 'both', 'governance_audit', 'buyer_intro'];
+
+// Pitches that are never swapped for the no-website mockup email.
+const NO_MOCKUP_NEED_TYPES = ['governance_audit', 'buyer_intro', 'reciprocal_link', 'research_contact'];
 
 // Short label for Notion's "Offer" field.
 const OFFER_LABELS = {
@@ -89,6 +93,7 @@ const OFFER_LABELS = {
   reciprocal_link: 'GlobalAggregate reciprocal link',
   research_contact: 'GlobalAggregate research tool',
   governance_audit: 'Legal AI: AI Governance Readiness Audit',
+  buyer_intro: 'Real estate: cash-buyer intro',
 };
 
 function issueLine(lead) {
@@ -105,13 +110,24 @@ function previewUrl(lead) {
   return buildPreviewUrl(lead, config.preview_base_url);
 }
 
-function totalSteps() {
-  return 1 + config.followups.length;
+function followupsFor(lead) {
+  return (config.followup_sets && config.followup_sets[lead.need_type]) || config.followups;
+}
+
+// Total touches for THIS lead (need types can have their own follow-ups).
+function totalSteps(lead) {
+  return 1 + (lead ? followupsFor(lead) : config.followups).length;
+}
+
+// Longest sequence across all need types, for the eligibility query.
+function maxSteps() {
+  const lengths = [config.followups.length, ...Object.values(config.followup_sets || {}).map((f) => f.length)];
+  return 1 + Math.max(...lengths);
 }
 
 function touchForStep(lead, step) {
   if (step === 1) {
-    if (!lead.site_url && config.preview_base_url && config.touch_sets.no_website && lead.need_type !== 'governance_audit') {
+    if (!lead.site_url && config.preview_base_url && config.touch_sets.no_website && !NO_MOCKUP_NEED_TYPES.includes(lead.need_type)) {
       return config.touch_sets.no_website[0];
     }
     const set = config.touch_sets[lead.need_type] || config.touch_sets.website;
@@ -122,7 +138,7 @@ function touchForStep(lead, step) {
     const pivotTouch = pivot.touches[step - pivot.start_step];
     if (pivotTouch) return pivotTouch;
   }
-  return config.followups[step - 2];
+  return followupsFor(lead)[step - 2];
 }
 
 async function fetchEligibleLeads() {
@@ -133,7 +149,7 @@ async function fetchEligibleLeads() {
     .not('email', 'is', null)
     .neq('email', '')
     .not('need_type', 'is', null)
-    .lt('sequence_step', totalSteps())
+    .lt('sequence_step', maxSteps())
     .order('created_at', { ascending: true })
     .limit(2000);
   if (error) throw error;
@@ -142,6 +158,7 @@ async function fetchEligibleLeads() {
 
 function isDue(lead) {
   const nextStep = lead.sequence_step + 1;
+  if (nextStep > totalSteps(lead)) return false;
   const touch = touchForStep(lead, nextStep);
   if (!touch) return false;
   if (lead.sequence_step === 0) return true;
@@ -173,22 +190,6 @@ async function notionPatch(pageId, properties) {
     body: JSON.stringify({ properties }),
   });
   if (!res.ok) console.error(`Notion property update failed: ${await res.text()}`);
-}
-
-// Used only when require_notion_approval is on. Any error reads as
-// "not approved".
-async function notionApproved(pageId) {
-  if (!NOTION_TOKEN || !pageId) return false;
-  try {
-    const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-      headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION },
-    });
-    if (!res.ok) return false;
-    const page = await res.json();
-    return page.properties?.Approve?.checkbox === true;
-  } catch {
-    return false;
-  }
 }
 
 async function notionComment(pageId, text) {
@@ -265,7 +266,7 @@ async function rejectEmail(lead, email, reason) {
 }
 
 async function advanceAfterSend(lead, step, extra = {}) {
-  const isLastTouch = step === totalSteps();
+  const isLastTouch = step >= totalSteps(lead);
   await updateLead(lead.id, {
     sequence_step: step,
     last_contacted: new Date().toISOString(),
@@ -319,15 +320,26 @@ async function sendTouch(lead) {
   // A short pause before each send keeps Gmail's per-minute limit happy
   // and makes the sending pattern look less like a blast.
   await new Promise((r) => setTimeout(r, 1500));
-  const sent = await sendGmail({
+  const message = {
     to: toAddress,
     subject: finalSubject,
     text: bodyText,
     replyTo: config.reply_to_email || undefined,
     fromName: config.from_display_name || undefined,
     fromEmail: config.from_display_name ? config.reply_to_email : undefined,
-    threadId: nextStep > 1 ? lead.gmail_thread_id : undefined,
-  });
+    threadId: nextStep > 1 ? lead.gmail_thread_id || undefined : undefined,
+  };
+  let sent;
+  try {
+    sent = await sendGmail(message);
+  } catch (err) {
+    // Gmail answers 404 when the thread we're replying into no longer
+    // exists in this mailbox (e.g. the first email came from the old
+    // draft flow and was deleted). Send it as a fresh email instead.
+    if (!message.threadId || !/"code":\s*404|notFound/.test(err.message)) throw err;
+    sent = await sendGmail({ ...message, threadId: undefined });
+    await updateLead(lead.id, { gmail_thread_id: sent.threadId });
+  }
 
   if (skipTracking) {
     console.log(`[TEST] Sent a preview of step ${nextStep} for ${lead.business_name} to the test inbox — not tracked.`);
@@ -347,13 +359,12 @@ async function run() {
     return;
   }
   mailingAddress = mailingAddress.trim();
-  const requireApproval = config.require_notion_approval === true;
 
   const maxNew = config.max_new_sends_per_run ?? 40;
   const maxFollowups = config.max_followups_per_run ?? 50;
   const leads = await fetchEligibleLeads();
 
-  const counts = { legacySent: 0, legacyAlready: 0, newSent: 0, followups: 0, rejected: 0, errors: 0, awaitingApproval: 0 };
+  const counts = { legacySent: 0, legacyAlready: 0, newSent: 0, followups: 0, rejected: 0, errors: 0 };
 
   // Follow-ups first (these people have already heard from us once),
   // then brand-new leads, oldest first.
@@ -374,28 +385,10 @@ async function run() {
             const pending = await draftStillPending(lead.gmail_draft_id);
             if (pending) continue;
           }
-          if (requireApproval && !(await notionApproved(lead.notion_page_id))) {
-            // Approval mode: a draft still sitting there waits for the tick;
-            // one that's gone was sent by hand, so it still moves forward.
-            if (DRY_RUN || (await draftStillPending(lead.gmail_draft_id))) {
-              counts.awaitingApproval++;
-              continue;
-            }
-          }
           const outcome = await resolveLegacyDraft(lead);
           if (outcome === 'sent_now') counts.legacySent++;
           else if (outcome === 'already_sent') counts.legacyAlready++;
           else counts.rejected++;
-          continue;
-        }
-        if (requireApproval && !(await notionApproved(lead.notion_page_id))) {
-          if (!lead.notion_page_id || DRY_RUN) continue;
-          const { subject, bodyText } = buildMessage(lead, 1);
-          await notionPatch(lead.notion_page_id, {
-            'Drafted Message': { rich_text: [{ text: { content: `Subject: ${subject}\n\n${bodyText}`.slice(0, 1990) } }] },
-            Offer: { rich_text: [{ text: { content: OFFER_LABELS[lead.need_type] || OFFER_LABELS.website } }] },
-          });
-          counts.awaitingApproval++;
           continue;
         }
         const ok = await sendTouch(lead);
@@ -428,7 +421,6 @@ async function run() {
       `First emails sent: ${counts.newSent} new + ${counts.legacySent} leftover drafts (cap ${maxNew}). ` +
       `Leftover drafts already sent by hand: ${counts.legacyAlready}. Follow-ups: ${counts.followups} (cap ${maxFollowups}). ` +
       `Bad addresses skipped: ${counts.rejected}. Errors: ${counts.errors}.` +
-      (requireApproval ? ` Waiting for Notion approval: ${counts.awaitingApproval}.` : '') +
       (config.test_mode ? ' [TEST MODE]' : '')
   ;
   console.log(`outreach-sequencer${DRY_RUN ? ' [DRY RUN]' : ''}: ${summary}`);
