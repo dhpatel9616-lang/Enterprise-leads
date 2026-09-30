@@ -55,11 +55,12 @@ const DEFAULTS = {
   enabled: false,
   max_calls_per_run: 10,
   monthly_budget_usd: 20,
-  est_cost_per_call_usd: 0.25,
+  est_cost_per_call_usd: 0.08, // budget planning only; real per-call prices from Bland replace it
   max_attempts: 2,
   retry_after_days: 3,
-  max_duration_min: 3,
-  call_days: [2, 3, 4], // Tue, Wed, Thu (0 = Sunday)
+  max_duration_min: 2,
+  call_after_email_step: 2, // also call leads emailed this many times with no reply
+  call_days: [1, 2, 3, 4, 5], // Mon–Fri (0 = Sunday)
   start_hour: 10,
   end_hour: 16,
   timezone: 'America/New_York',
@@ -186,6 +187,10 @@ async function collectResults(counts) {
         }
       }
       if (!update.call_outcome) update.call_outcome = 'no_answer';
+      // A clear "no" on the phone also stops the email sequence.
+      if (['do_not_call', 'not_interested'].includes(update.call_outcome) && ['new', 'contacted', 'cold'].includes(lead.status)) {
+        update.status = 'not_interested';
+      }
       counts[update.call_outcome] = (counts[update.call_outcome] || 0) + 1;
 
       if (!DRY_RUN) {
@@ -216,19 +221,23 @@ async function fetchCallQueue(cfg, limit) {
   const retryBefore = new Date(Date.now() - cfg.retry_after_days * 86400000).toISOString();
   const { data, error } = await supabase
     .from('leads')
-    .select('id, business_name, phone, phone_type, site_url, address, location_name, category, need_type, status, email, call_attempts, call_outcome, called_at')
+    .select('id, business_name, phone, phone_type, site_url, address, location_name, category, need_type, status, email, sequence_step, call_attempts, call_outcome, called_at')
     .in('phone_type', AI_SAFE_TYPES)
     .eq('do_not_call', false)
     .neq('product', 'real_estate')
     .in('need_type', ['website', 'both', 'social'])
-    .or('status.eq.bounced,status.eq.bad_email,and(status.eq.new,email.is.null)')
+    // No working email (no site, bounced), OR emailed at least twice with
+    // no reply (the AI call is the follow-up that gets through).
+    .or(`status.eq.bounced,status.eq.bad_email,status.eq.cold,and(status.eq.new,email.is.null),and(status.eq.contacted,sequence_step.gte.${cfg.call_after_email_step})`)
     .or(`call_outcome.is.null,and(call_outcome.in.(voicemail,no_answer,failed),called_at.lt.${retryBefore})`)
     .lt('call_attempts', cfg.max_attempts)
     .order('created_at', { ascending: true })
     .limit(500);
   if (error) throw new Error(error.message);
   const rows = data || [];
-  rows.sort((a, b) => (a.site_url ? 1 : 0) - (b.site_url ? 1 : 0)); // no-website businesses first
+  // No-website businesses first, then never-emailed, then emailed-no-reply.
+  const rank = (l) => (l.site_url ? 1 : 0) * 2 + (l.email ? 1 : 0);
+  rows.sort((a, b) => rank(a) - rank(b));
   return rows.slice(0, limit);
 }
 
@@ -257,7 +266,9 @@ async function placeCalls(cfg, counts) {
   for (const lead of queue) {
     const to = toE164(lead.phone);
     if (!to) continue;
-    const situation = lead.site_url
+    const situation = lead.email
+      ? "Deven emailed them a sample website recently but hasn't heard back; mention that briefly and offer to resend it."
+      : lead.site_url
       ? "Their website has some problems (for example it doesn't work well on phones)."
       : "They don't appear to have a website.";
     const body = {
@@ -270,10 +281,12 @@ async function placeCalls(cfg, counts) {
       timezone: cfg.timezone,
       request_data: { business_name: lead.business_name, city: cityOf(lead), situation },
       metadata: { lead_id: lead.id, source: 'enterprise-leads' },
-      voicemail: {
-        action: 'leave_message',
-        message: `Hi, this is an AI assistant calling for Deven Patel at Wade Capital. Deven made a free sample website for ${lead.business_name}. If you'd like to see it, call or text Deven at ${cfg.callback_number}. Thanks, and have a great day.`,
-      },
+      // Voicemail time is billed like talk time, so hang up on voicemail
+      // until the last attempt, then leave one short message.
+      voicemail:
+        (lead.call_attempts || 0) + 1 >= cfg.max_attempts
+          ? { action: 'leave_message', message: `Hi, this is an AI assistant for Deven Patel at Wade Capital. Deven made a free sample website for ${lead.business_name}. To see it, call or text ${cfg.callback_number}. Thanks!` }
+          : { action: 'hangup' },
     };
     if (cfg.voice) body.voice = cfg.voice;
     if (cfg.transfer_phone_number) body.transfer_phone_number = cfg.transfer_phone_number;
