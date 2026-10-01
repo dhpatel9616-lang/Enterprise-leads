@@ -102,31 +102,38 @@ function cityOf(lead) {
 }
 
 function buildTask(cfg) {
-  return `You are ${cfg.agent_name}, an AI assistant making a short call on behalf of Deven Patel, founder of Wade Capital, a small studio that builds websites for local businesses.
+  return `You are ${cfg.agent_name}, an AI assistant making a short call on behalf of Deven Patel, founder of Wade Capital. Wade Capital builds automation tailored to each local business:
+- Websites that turn Google searches into calls and bookings.
+- File management: invoices, forms, and records named, sorted, and backed up automatically.
+- AI voice agents, like you, that answer the business's phone, take messages, and book appointments, even after hours.
+- Social media that posts on its own.
+Each solution is fixed price, and Deven starts with whichever one saves the business the most time.
 
-You are calling {{business_name}} in {{city}}. {{situation}} Deven already made a free sample website for them from their public Google listing, and wants to send them the link. There is no cost and no obligation.
+You are calling {{business_name}} in {{city}}. {{situation}}
+
+Early in the call, say in one or two plain sentences what Wade Capital does, naming all four examples above. Then ask which of those takes up the most of their time today.
 
 Your goal, in order of preference:
-1. Get the best email address to send the free sample site to. Ask them to spell it, then read it back letter by letter to confirm.
-2. If they'd rather talk to a person, ask for their name and the best day and time for Deven to call back.
+1. Get the best email address to send details (and the free sample website, if there is one) to. Ask them to spell it, then read it back letter by letter to confirm.
+2. If they'd rather talk to a person, ask for their name, what they're most interested in, and the best day and time for Deven to call back.
 
 Rules you must follow:
-- You already said you are an AI assistant and that the call may be recorded. If asked, always confirm you are an AI calling for Deven. Never claim to be human.
+- You already said you are an AI assistant and that the call may be recorded. If asked, always confirm you are an AI calling for Deven. Never claim to be human. It's fine to point out that you are an example of the voice agents Wade Capital sets up.
 - Keep the call under two minutes. Be warm, brief, and plain-spoken. Never pressure or argue.
-- If you reach a receptionist or employee, ask who handles the business's website or marketing and whether you can get an email for that person, or leave Deven's number: ${cfg.callback_number}.
-- If they say they're not interested or already have a website they're happy with, thank them and end the call politely.
+- If you reach a receptionist or employee, ask who handles the business's website, technology, or operations and whether you can get an email for that person, or leave Deven's number: ${cfg.callback_number}.
+- If they say they're not interested, thank them and end the call politely.
 - If they ask not to be called again, apologize, say you'll make sure they aren't called again, and end the call immediately.
-- If asked about price: websites are a fixed price that Deven quotes after seeing what they need, and hosting and updates can be included. Do not make up numbers.
+- If asked about price: every project is a fixed price that Deven quotes after seeing what the business needs. Do not make up numbers, timelines, or results.
 - If asked how you got their number: it's the number on their public Google listing.
-- Do not discuss anything unrelated to the sample website, and do not collect any payment or sensitive information.`;
+- Do not discuss anything unrelated to these services, and do not collect any payment or sensitive information.`;
 }
 
 const ANALYSIS_QUESTIONS = [
   ['Did the person ask not to be called again, or ask to be removed from calls?', 'boolean'],
-  ['Did the person say they are interested, want to see the sample website, or want to talk to Deven?', 'boolean'],
+  ['Did the person say they are interested in any of the services (website, file management, AI voice agent, social media), want to see the sample website, or want to talk to Deven?', 'boolean'],
   ['What email address did the person give? Return it exactly, lowercase, with no spaces, or null if none.', 'string'],
   ['Did the person ask for a callback? If yes, who should Deven ask for and when? Otherwise null.', 'string'],
-  ['Did the person say they are not interested or already have a website they are happy with?', 'boolean'],
+  ['Did the person say they are not interested in any of the services?', 'boolean'],
   ['Did a real person answer the call (not voicemail, not an automated phone menu only)?', 'boolean'],
 ];
 
@@ -162,7 +169,7 @@ async function collectResults(counts) {
       if (!update.call_outcome && humanTalked) {
         const analysis = await bland(`/calls/${lead.call_id}/analyze`, {
           method: 'POST',
-          body: { goal: 'Get an email address to send a free sample website to, or book a callback with Deven.', questions: ANALYSIS_QUESTIONS },
+          body: { goal: 'Get an email address to send details about Wade Capital automation services (websites, file management, AI voice agents, social media) and the free sample website to, or book a callback with Deven.', questions: ANALYSIS_QUESTIONS },
         });
         const [dnc, interested, emailRaw, callback, notInterested, realPerson] = analysis.answers || [];
         const email = looksValid(asText(emailRaw));
@@ -266,11 +273,14 @@ async function placeCalls(cfg, counts) {
   for (const lead of queue) {
     const to = toE164(lead.phone);
     if (!to) continue;
+    // Same rule as the email sequencer: website pitches and no-site leads get a sample site.
+    const hasSample = !lead.site_url || ['website', 'both'].includes(lead.need_type);
+    const sample = hasSample ? ' Deven already made them a free sample website from their public Google listing; offer to send the link.' : '';
     const situation = lead.email
-      ? "Deven emailed them a sample website recently but hasn't heard back; mention that briefly and offer to resend it."
+      ? "Deven emailed them recently but hasn't heard back; mention that briefly and offer to resend it."
       : lead.site_url
-      ? "Their website has some problems (for example it doesn't work well on phones)."
-      : "They don't appear to have a website.";
+      ? `Their website has some problems (for example it doesn't work well on phones).${sample}`
+      : `They don't appear to have a website.${sample}`;
     const body = {
       phone_number: to,
       task,
@@ -285,7 +295,7 @@ async function placeCalls(cfg, counts) {
       // until the last attempt, then leave one short message.
       voicemail:
         (lead.call_attempts || 0) + 1 >= cfg.max_attempts
-          ? { action: 'leave_message', message: `Hi, this is an AI assistant for Deven Patel at Wade Capital. Deven made a free sample website for ${lead.business_name}. To see it, call or text ${cfg.callback_number}. Thanks!` }
+          ? { action: 'leave_message', message: `Hi, this is an AI assistant for Deven Patel at Wade Capital. We build automation for local businesses: websites, file management, AI phone agents like me, and social media that posts itself. ${hasSample ? `Deven also made a free sample website for ${lead.business_name}. ` : ''}To hear more, call or text ${cfg.callback_number}. Thanks!` }
           : { action: 'hangup' },
     };
     if (cfg.voice) body.voice = cfg.voice;
