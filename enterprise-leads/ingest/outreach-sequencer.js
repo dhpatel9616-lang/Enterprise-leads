@@ -44,6 +44,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
 const { sendGmail, deleteDraft, draftStillPending, recentSendLimitHit } = require('./lib/gmail');
+const { fetchSignals } = require('./lib/site-signals');
 const { checkSendable } = require('./lib/email-quality');
 const { previewUrl: buildPreviewUrl } = require('./lib/preview');
 const { createRunLog } = require('./lib/run-log');
@@ -99,6 +100,11 @@ const OFFER_LABELS = {
 function issueLine(lead) {
   if (lead.need_type === 'social') return "doesn't link to any social media accounts";
   if (!lead.site_url) return "doesn't seem to have a website";
+  // A footer copyright 3+ years old is the most specific thing we can point to.
+  if (lead.copyright_year && lead.copyright_year <= new Date().getFullYear() - 3) {
+    const extra = !lead.mobile_ok ? " and doesn't adjust for phone screens" : !lead.has_ssl ? ' and shows a "not secure" warning in some browsers' : '';
+    return `still shows © ${lead.copyright_year} in the footer${extra}`;
+  }
   if (!lead.mobile_ok && !lead.has_ssl) return "doesn't adjust for phones and shows a \"not secure\" warning in some browsers";
   if (!lead.mobile_ok) return "doesn't adjust for phone screens";
   if (!lead.has_ssl) return "shows a \"not secure\" warning in some browsers (no SSL certificate)";
@@ -249,7 +255,8 @@ function buildMessage(lead, nextStep) {
   // Follow-ups reuse the FIRST email's subject ("Re: ...") so Gmail keeps
   // the whole sequence in one thread on the recipient's side.
   const subject = fillTemplate(nextStep > 1 ? touchForStep(lead, 1).subject : touch.subject, vars);
-  const bodyText = fillTemplate(touch.body, vars).replace(/\n{3,}/g, '\n\n') + footer(lead);
+  let bodyText = fillTemplate(touch.body, vars).replace(/\n{3,}/g, '\n\n') + footer(lead);
+  if (nextStep === 1 && lead.owner_first) bodyText = bodyText.replace(/^Hi,/, `Hi ${lead.owner_first},`);
   const threadedSubject = nextStep > 1 ? `Re: ${subject}` : subject;
   return { subject, bodyText, threadedSubject };
 }
@@ -322,6 +329,19 @@ async function sendTouch(lead) {
   }
   if (check.email !== lead.email && !DRY_RUN) await updateLead(lead.id, { email: check.email });
   lead.email = check.email;
+
+  // First email only: read the homepage for the owner's name and an old copyright year.
+  // Agency-built sites already pay someone for their website: skip them for good.
+  if (nextStep === 1 && lead.site_url) {
+    const sig = await fetchSignals(lead.site_url);
+    if (sig.builtBy && lead.need_type !== 'social') {
+      console.log(`  - ${lead.business_name}: site built by ${sig.builtBy}; skipping.`);
+      if (!DRY_RUN) await updateLead(lead.id, { email_enrichment_result: 'agency_managed' });
+      return false;
+    }
+    lead.owner_first = sig.ownerFirst;
+    lead.copyright_year = sig.copyrightYear;
+  }
 
   const { subject, bodyText, threadedSubject } = buildMessage(lead, nextStep);
   const { isTest, skipTracking, toAddress } = trackingDecision(lead);
@@ -396,7 +416,12 @@ async function run() {
 
   // Categories we no longer target (settings.outreach.skip_categories) don't get first emails.
   const skip = new Set(config.skip_categories || []);
-  const queue = [...followupLeads, ...firstTouchLeads.filter((l) => !skip.has(l.category))];
+  // Best leads first: no site or a broken one, an address at their own domain.
+  const score = (l) => (!l.site_url ? 3 : 0) + (!l.mobile_ok ? 2 : 0) + (!l.has_ssl ? 1 : 0) + (l.need_type === 'both' ? 1 : 0) +
+    (l.site_url && l.email && l.site_url.includes(l.email.split('@')[1]) ? 2 : 0);
+  const fresh = firstTouchLeads.filter((l) => !skip.has(l.category) && l.email_enrichment_result !== 'agency_managed')
+    .sort((a, b) => score(b) - score(a));
+  const queue = [...followupLeads, ...fresh];
 
   for (const lead of queue) {
     try {
