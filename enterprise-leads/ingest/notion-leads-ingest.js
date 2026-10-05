@@ -45,6 +45,23 @@ const NOTION_API = 'https://api.notion.com/v1';
 
 const SOCIAL_DOMAINS = ['facebook.com/', 'instagram.com/', 'twitter.com/', 'x.com/', 'tiktok.com/', 'linkedin.com/company'];
 
+// Who we can actually help: an active, owner-run small business. Too few
+// Google reviews usually means inactive or brand new (no budget yet); too
+// many means a bigger operation with its own marketing team. Chain and
+// franchise locations (store-locator URLs, or one website shared by several
+// results) can't buy a website or social media on their own.
+const CHAIN_URL = /\/(locations?|stores?|offices?|branches|find-a-|clinic-locator)(\/|-|$)/i;
+function fitsSmallBusiness(place, sameSiteCount, cfg) {
+  const reviews = place.userRatingCount || 0;
+  if (reviews < (cfg.min_reviews ?? 5) || reviews > (cfg.max_reviews ?? 400)) return false;
+  if (place.websiteUri && (CHAIN_URL.test(place.websiteUri) || sameSiteCount > 1)) return false;
+  return true;
+}
+
+function siteHost(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return null; }
+}
+
 // Some categories aren't being evaluated for "does this business need a
 // website/social fix" at all — the pitch is something else entirely, and
 // every business in that category is worth reaching regardless of how
@@ -74,7 +91,7 @@ async function searchPlaces(query, locationBias) {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': PLACES_KEY,
       'X-Goog-FieldMask':
-        'places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.id,places.businessStatus',
+        'places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.id,places.businessStatus,places.userRatingCount',
     },
     body: JSON.stringify({
       textQuery: query.q,
@@ -341,20 +358,24 @@ async function run() {
       await saveUsage(usage);
     }
     const candidates = [];
+    const siteCounts = {};
+    for (const pl of places) { const h = siteHost(pl.websiteUri); if (h) siteCounts[h] = (siteCounts[h] || 0) + 1; }
 
     for (const place of places) {
+      if (!fitsSmallBusiness(place, siteCounts[siteHost(place.websiteUri)] || 0, config)) continue;
       const businessName = place.displayName?.text || 'Unknown';
       const siteUrl = place.websiteUri || null;
       const phone = place.nationalPhoneNumber || null;
       const address = place.formattedAddress || null;
       const { hasSite, hasSsl, mobileOk, email, hasSocial } = await checkSite(siteUrl);
-      const needType = CATEGORY_NEED_OVERRIDES[query.category] || classifyNeed({ hasSite, hasSsl, mobileOk, hasSocial });
+      // Website/social needs first (law firms included); the category pitch (e.g. legal AI) only when their web presence is already fine.
+      const needType = classifyNeed({ hasSite, hasSsl, mobileOk, hasSocial }) || CATEGORY_NEED_OVERRIDES[query.category];
       processed++;
       if (!needType) continue;
       flagged++;
       candidates.push({
         businessName, siteUrl, phone, address, hasSite, hasSsl, mobileOk, email, hasSocial, needType, placeId: place.id,
-        score: priorityScore({ hasSite, hasSsl, mobileOk, hasSocial, needType }),
+        score: priorityScore({ hasSite, hasSsl, mobileOk, hasSocial, needType }) + (place.userRatingCount >= 20 && place.userRatingCount <= 150 ? 1 : 0),
       });
     }
 

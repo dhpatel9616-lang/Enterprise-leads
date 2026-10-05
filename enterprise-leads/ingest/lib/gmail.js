@@ -210,4 +210,15 @@ async function getThreadMessages(threadId) {
   return data.messages || [];
 }
 
-module.exports = { sendGmail, createDraft, sendDraft, deleteDraft, draftStillPending, getOwnEmailAddress, getThreadMessages };
+// True if Gmail bounced one of our own sends for hitting the account's daily
+// sending limit in the last 24 hours. Those notices mean "never sent", and
+// sending more only produces more of them.
+async function recentSendLimitHit() {
+  const q = encodeURIComponent('from:mailer-daemon newer_than:1d "limit for sending"');
+  const res = await gmailFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=1&q=${q}`);
+  if (!res.ok) throw new Error(`Gmail search failed: ${res.status}`);
+  const data = await res.json();
+  return (data.messages || []).length > 0;
+}
+
+module.exports = { recentSendLimitHit, sendGmail, createDraft, sendDraft, deleteDraft, draftStillPending, getOwnEmailAddress, getThreadMessages };

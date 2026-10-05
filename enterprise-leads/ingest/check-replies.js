@@ -40,6 +40,9 @@ const runLog = createRunLog(supabase, 'check-replies');
 
 const BOUNCE_FROM = /mailer-daemon|postmaster|mail delivery (subsystem|system)|microsoftexchange|bounce/i;
 const BOUNCE_SUBJECT = /delivery status notification|undeliver|delivery (has )?failed|failure notice|returned mail|could not be delivered|mail delivery failed|delivery incomplete|message not delivered|address not found/i;
+// Gmail refusing OUR send for the daily limit: the email never left, the
+// address is fine. The lead is put back one step to be sent again.
+const NOT_SENT = /limit for sending|sending limit|message was not sent|sending quota/i;
 // Temporary "still trying to deliver" notices are not bounces.
 const DELAY_NOTICE = /\(delay\)|delivery (is )?delayed|temporary problem delivering|will retry/i;
 // Auto-responders that don't say so in the subject (e.g. "After Hours Message").
@@ -57,14 +60,14 @@ function classify(message) {
   const autoSubmitted = header(message, 'Auto-Submitted');
   const snippet = message.snippet || '';
   if (DELAY_NOTICE.test(subject) || DELAY_NOTICE.test(snippet)) return 'auto';
-  if (BOUNCE_FROM.test(from) || BOUNCE_SUBJECT.test(subject)) return 'bounce';
+  if (BOUNCE_FROM.test(from) || BOUNCE_SUBJECT.test(subject)) return NOT_SENT.test(`${subject} ${snippet}`) ? 'not_sent' : 'bounce';
   if (UNSUB_TEXT.test(snippet) || UNSUB_TEXT.test(subject)) return 'unsubscribe';
   if ((autoSubmitted && autoSubmitted.toLowerCase() !== 'no') || AUTO_SUBJECT.test(subject) || AUTO_TEXT.test(snippet)) return 'auto';
   return 'reply';
 }
 
 // Strongest signal wins: a human reply beats an auto-reply, etc.
-const RANK = { reply: 4, unsubscribe: 3, bounce: 2, auto: 1 };
+const RANK = { reply: 4, unsubscribe: 3, bounce: 2, not_sent: 1.5, auto: 1 };
 
 // Returns { kind, from, subject, snippet } for the strongest incoming
 // message in the thread, or { kind: null } if nothing came back.
@@ -76,7 +79,7 @@ async function inspectThread(threadId, ownEmail) {
     if (header(m, 'From').toLowerCase().includes(ownEmail.toLowerCase())) continue;
     const kind = classify(m);
     if (!best.kind || RANK[kind] > RANK[best.kind]) {
-      best = { kind, from: header(m, 'From').slice(0, 200), subject: header(m, 'Subject').slice(0, 300), snippet: (m.snippet || '').slice(0, 500) };
+      best = { kind, date: Number(m.internalDate || 0), from: header(m, 'From').slice(0, 200), subject: header(m, 'Subject').slice(0, 300), snippet: (m.snippet || '').slice(0, 500) };
     }
   }
   return best;
@@ -141,7 +144,7 @@ async function run() {
   }
 
   const ownEmail = await getOwnEmailAddress();
-  const tally = { reply: 0, unsubscribe: 0, bounce: 0, auto: 0, restored: 0 };
+  const tally = { reply: 0, unsubscribe: 0, bounce: 0, auto: 0, restored: 0, not_sent: 0 };
 
   for (const lead of leads) {
     // Pace thread reads so a big batch stays under Gmail's per-minute limit.
@@ -150,6 +153,24 @@ async function run() {
       const found = await inspectThread(lead.gmail_thread_id, ownEmail);
       const kind = found.kind;
       const isLegacy = lead.status === 'replied';
+
+      if (kind === 'not_sent') {
+        // Only for a limit notice newer than our last send, and only once.
+        const sentAt = lead.last_contacted ? Date.parse(lead.last_contacted) : 0;
+        if (lead.reply_kind !== 'not_sent' && found.date >= sentAt - 60000) {
+          const step = Math.max((lead.sequence_step || 0) - 1, 0);
+          const { error: rbErr } = await supabase.from('leads').update({
+            sequence_step: step,
+            status: step === 0 ? 'new' : 'contacted',
+            reply_kind: 'not_sent',
+            ...(step === 0 ? { gmail_thread_id: null } : {}),
+          }).eq('id', lead.id);
+          if (rbErr) throw new Error(rbErr.message);
+          tally.not_sent++;
+          console.log(`check-replies: ${lead.business_name} → not sent (Gmail limit), back to step ${step}`);
+        }
+        continue;
+      }
 
       if (!kind || kind === 'auto') {
         if (kind) tally.auto++;
@@ -192,7 +213,7 @@ async function run() {
 
   const summary =
     `checked ${leads.length} threads. Real replies: ${tally.reply}. Unsubscribes: ${tally.unsubscribe}. ` +
-      `Bounces: ${tally.bounce}. Auto-replies ignored: ${tally.auto}. Old "replied" leads put back in sequence: ${tally.restored}.`;
+      `Bounces: ${tally.bounce}. Not sent (Gmail limit, will resend): ${tally.not_sent}. Auto-replies ignored: ${tally.auto}. Old "replied" leads put back in sequence: ${tally.restored}.`;
   console.log(`check-replies: ${summary}`);
   await runLog.finish(summary);
 }
