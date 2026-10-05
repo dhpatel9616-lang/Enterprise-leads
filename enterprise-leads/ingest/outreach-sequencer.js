@@ -43,7 +43,7 @@
  */
 const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
-const { sendGmail, deleteDraft, draftStillPending } = require('./lib/gmail');
+const { sendGmail, deleteDraft, draftStillPending, recentSendLimitHit } = require('./lib/gmail');
 const { checkSendable } = require('./lib/email-quality');
 const { previewUrl: buildPreviewUrl } = require('./lib/preview');
 const { createRunLog } = require('./lib/run-log');
@@ -286,6 +286,7 @@ async function advanceAfterSend(lead, step, extra = {}) {
     last_contacted: new Date().toISOString(),
     status: isLastTouch ? 'cold' : 'contacted',
     gmail_draft_id: null,
+    reply_kind: null, // clears a past 'not_sent' so a future limit bounce is handled again
     ...extra,
   });
 }
@@ -374,8 +375,16 @@ async function run() {
   }
   mailingAddress = mailingAddress.trim();
 
-  const maxNew = config.max_new_sends_per_run ?? 40;
-  const maxFollowups = config.max_followups_per_run ?? 50;
+  // Gmail bounced sends for the daily limit in the last 24 h: sending more only
+  // bounces more (and floods the inbox). Wait for the limit to reset.
+  if (!DRY_RUN && (await recentSendLimitHit())) {
+    console.log('outreach-sequencer: Gmail reported its daily sending limit in the last 24 hours. Skipping this run.');
+    await runLog.finish('skipped: Gmail sending limit hit in the last 24 hours');
+    return;
+  }
+
+  const maxNew = config.max_new_sends_per_run ?? 25;
+  const maxFollowups = config.max_followups_per_run ?? 25;
   const leads = await fetchEligibleLeads();
 
   const counts = { legacySent: 0, legacyAlready: 0, newSent: 0, followups: 0, rejected: 0, errors: 0 };
@@ -385,7 +394,9 @@ async function run() {
   const followupLeads = leads.filter((l) => l.sequence_step > 0);
   const firstTouchLeads = leads.filter((l) => l.sequence_step === 0);
 
-  const queue = [...followupLeads, ...firstTouchLeads];
+  // Categories we no longer target (settings.outreach.skip_categories) don't get first emails.
+  const skip = new Set(config.skip_categories || []);
+  const queue = [...followupLeads, ...firstTouchLeads.filter((l) => !skip.has(l.category))];
 
   for (const lead of queue) {
     try {
