@@ -176,9 +176,13 @@ function extractEmails(rawHtml) {
 function pickBestEmail(emails, siteDomain) {
   if (emails.length === 0) return null;
 
-  // Prefer an email whose domain matches the business's own site domain
-  const sameDomain = emails.find((e) => e.split("@")[1] === siteDomain);
-  if (sameDomain) return sameDomain;
+  // Prefer the business's own domain, and a real person there (maria@) over a
+  // shared inbox (info@): a named person is far more likely to read and reply.
+  const ROLE = /^(info|contact|hello|office|admin|support|sales|team|mail|inquiries|enquiries|service|help|frontdesk|reception)@/i;
+  const own = emails.filter((e) => e.split("@")[1] === siteDomain);
+  const person = own.find((e) => !ROLE.test(e));
+  if (person) return person;
+  if (own.length) return own[0];
 
   // Otherwise prefer common role addresses over random personal-looking ones
   const rolePriority = ["info@", "contact@", "hello@", "office@"];
