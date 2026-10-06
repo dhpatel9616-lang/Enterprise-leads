@@ -1,7 +1,9 @@
 // Free, no-AI details read from a business's own homepage, used to make the
 // first email specific: the owner's first name (for "Hi Maria,"), an old
 // copyright year (a concrete, checkable sign the site is neglected), and a
-// "website by <agency>" credit (they already pay someone; lower priority).
+// "website by <agency>" credit (they already pay someone; lower priority),
+// and whether the site really loads over https and has a phone layout (the
+// listing's http:// link alone said nothing: most of those sites redirect).
 // Precision over recall: when unsure, return null and the email stays generic.
 
 const NOT_NAMES = new Set(('our the meet about contact home welcome services team staff us your we call book ' +
@@ -50,14 +52,28 @@ function signalsFromHtml(html, nowYear = new Date().getFullYear()) {
   return { ownerFirst: ownerFirstName(text), copyrightYear: copyrightYear(text, nowYear), builtBy: builtBy(text) };
 }
 
+const NONE = { ownerFirst: null, copyrightYear: null, builtBy: null, reachable: false, secure: null, mobileOk: null };
+
+async function load(url, timeoutMs) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WadeCapitalBot/1.0)' } });
+  if (!res.ok) throw new Error(String(res.status));
+  return { finalUrl: res.url, html: await res.text() };
+}
+
 async function fetchSignals(url, timeoutMs = 8000) {
-  if (!url) return { ownerFirst: null, copyrightYear: null, builtBy: null };
+  if (!url) return NONE;
+  let page;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WadeCapitalBot/1.0)' } });
-    return signalsFromHtml(await res.text());
+    page = await load(url.replace(/^http:/i, 'https:'), timeoutMs);
   } catch {
-    return { ownerFirst: null, copyrightYear: null, builtBy: null };
+    try { page = await load(url, timeoutMs); } catch { return NONE; }
   }
+  return {
+    ...signalsFromHtml(page.html),
+    reachable: true,
+    secure: page.finalUrl.startsWith('https:'),
+    mobileOk: /<meta[^>]+name=["']viewport["']/i.test(page.html),
+  };
 }
 
 module.exports = { signalsFromHtml, fetchSignals };
