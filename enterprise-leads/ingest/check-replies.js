@@ -204,6 +204,7 @@ async function run() {
             sequence_step: step,
             status: step === 0 ? 'new' : 'contacted',
             reply_kind: 'not_sent',
+            updated_at: new Date().toISOString(), // the sequencer skips sending for 24 h after this
             ...(step === 0 ? { gmail_thread_id: null } : {}),
           }).eq('id', lead.id);
           if (rbErr) throw new Error(rbErr.message);

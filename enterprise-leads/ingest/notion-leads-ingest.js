@@ -120,12 +120,16 @@ async function searchPlaces(query, locationBias) {
 // simply had no way to check.
 async function checkSite(url) {
   if (!url) return { hasSite: false, hasSsl: false, mobileOk: false, email: null, hasSocial: null };
-  const hasSsl = url.startsWith('https://');
+  // Listings often link http:// to sites that redirect to https, so try https
+  // first and judge by where the page actually landed.
+  let hasSsl = false;
   let mobileOk = false;
   let email = null;
   let hasSocial = false;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await fetch(url.replace(/^http:/i, 'https:'), { signal: AbortSignal.timeout(8000) })
+      .catch(() => fetch(url, { signal: AbortSignal.timeout(8000) }));
+    hasSsl = res.url.startsWith('https://');
     const html = await res.text();
     mobileOk = /<meta[^>]+name=["']viewport["']/i.test(html);
     const mailtoMatch = html.match(/mailto:([^"'?\s]+)/i);

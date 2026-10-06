@@ -347,8 +347,17 @@ async function sendTouch(lead) {
 
   // First email only: read the homepage for the owner's name and an old copyright year.
   // Agency-built sites already pay someone for their website: skip them for good.
+  // The issue we name must be true: https and the phone layout are checked
+  // live here (the stored flags came from the listing link and were often wrong).
   if (nextStep === 1 && lead.site_url) {
     const sig = await fetchSignals(lead.site_url);
+    if (!sig.reachable) {
+      console.log(`  - ${lead.business_name}: site didn't load; skipping.`);
+      if (!DRY_RUN) await updateLead(lead.id, { email_enrichment_result: 'site_unreachable' });
+      return false;
+    }
+    lead.has_ssl = sig.secure;
+    lead.mobile_ok = sig.mobileOk;
     if (sig.builtBy && lead.need_type !== 'social') {
       console.log(`  - ${lead.business_name}: site built by ${sig.builtBy}; skipping.`);
       if (!DRY_RUN) await updateLead(lead.id, { email_enrichment_result: 'agency_managed' });
@@ -356,6 +365,13 @@ async function sendTouch(lead) {
     }
     lead.owner_first = sig.ownerFirst;
     lead.copyright_year = sig.copyrightYear;
+    if (!DRY_RUN) await updateLead(lead.id, { has_ssl: sig.secure, mobile_ok: sig.mobileOk });
+    // Only email when there's something real and specific to point to.
+    if (!categoryTouches(lead) && ['website', 'both'].includes(lead.need_type) && issueLine(lead) === 'could use a refresh') {
+      console.log(`  - ${lead.business_name}: site checks out fine; no clear issue, skipping.`);
+      if (!DRY_RUN) await updateLead(lead.id, { email_enrichment_result: 'no_clear_issue' });
+      return false;
+    }
   }
 
   const { subject, bodyText, threadedSubject } = buildMessage(lead, nextStep);
@@ -412,7 +428,10 @@ async function run() {
 
   // Gmail bounced sends for the daily limit in the last 24 h: sending more only
   // bounces more (and floods the inbox). Wait for the limit to reset.
-  if (!DRY_RUN && (await recentSendLimitHit())) {
+  const dayAgo = new Date(Date.now() - 86400000).toISOString();
+  const { count: limitBounces } = await supabase.from('leads').select('id', { count: 'exact', head: true })
+    .eq('reply_kind', 'not_sent').gte('updated_at', dayAgo);
+  if (!DRY_RUN && (limitBounces > 0 || (await recentSendLimitHit()))) {
     console.log('outreach-sequencer: Gmail reported its daily sending limit in the last 24 hours. Skipping this run.');
     await runLog.finish('skipped: Gmail sending limit hit in the last 24 hours');
     return;
@@ -434,11 +453,25 @@ async function run() {
   // Best leads first: law firms (bigger engagements), then no site or a broken one, an address at their own domain.
   const score = (l) => (l.need_type === 'governance_audit' ? 10 : 0) + (!l.site_url ? 3 : 0) + (!l.mobile_ok ? 2 : 0) + (!l.has_ssl ? 1 : 0) + (l.need_type === 'both' ? 1 : 0) +
     (l.site_url && l.email && l.site_url.includes(l.email.split('@')[1]) ? 2 : 0);
-  const fresh = firstTouchLeads.filter((l) => (!skip.has(l.category) || categoryTouches(l)) && l.email_enrichment_result !== 'agency_managed')
+  const done = ['agency_managed', 'no_clear_issue', 'site_unreachable'];
+  const fresh = firstTouchLeads.filter((l) => (!skip.has(l.category) || categoryTouches(l)) && !done.includes(l.email_enrichment_result))
     .sort((a, b) => score(b) - score(a));
   const queue = [...followupLeads, ...fresh];
+  const runStart = Math.floor(Date.now() / 1000);
+  let checkedAt = 0;
 
   for (const lead of queue) {
+    // Gmail's limit bounces arrive seconds after a send: check every 10 sends
+    // and stop at once, instead of sending the whole batch into a wall.
+    const sentSoFar = counts.newSent + counts.legacySent + counts.followups;
+    if (!DRY_RUN && sentSoFar >= checkedAt + 10) {
+      checkedAt = sentSoFar;
+      if (await recentSendLimitHit(runStart)) {
+        console.error('outreach-sequencer: Gmail hit its sending limit mid-run — stopping. check-replies will requeue what bounced.');
+        counts.stoppedAtLimit = true;
+        break;
+      }
+    }
     try {
       if (lead.sequence_step === 0) {
         if (counts.newSent + counts.legacySent >= maxNew && !lead.gmail_draft_id) continue;
@@ -485,7 +518,8 @@ async function run() {
     `${leads.length} eligible. ` +
       `First emails sent: ${counts.newSent} new + ${counts.legacySent} leftover drafts (cap ${maxNew}). ` +
       `Leftover drafts already sent by hand: ${counts.legacyAlready}. Follow-ups: ${counts.followups} (cap ${maxFollowups}). ` +
-      `Bad addresses skipped: ${counts.rejected}. Errors: ${counts.errors}.` +
+      `Bad addresses / no clear issue skipped: ${counts.rejected}. Errors: ${counts.errors}.` +
+      (counts.stoppedAtLimit ? ' STOPPED EARLY: Gmail sending limit.' : '') +
       (config.test_mode ? ' [TEST MODE]' : '')
   ;
   console.log(`outreach-sequencer${DRY_RUN ? ' [DRY RUN]' : ''}: ${summary}`);
