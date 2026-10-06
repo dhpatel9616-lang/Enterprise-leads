@@ -1,0 +1,31 @@
+name: Enterprise Leads — Record Phone-Agent Demo
+
+# Run by hand (Actions → this workflow → Run workflow). The AI agent calls
+# the number you type, answers as a demo pizza shop, and you order like a
+# customer. The recording link is saved for the restaurant outreach email.
+on:
+  workflow_dispatch:
+    inputs:
+      phone:
+        description: 'Your phone number (10 digits). Only use a number you own.'
+        required: true
+
+jobs:
+  demo-call:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: "enterprise-leads"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: node ingest/demo-call.js
+        env:
+          DEMO_PHONE: ${{ inputs.phone }}
+          BLAND_API_KEY: ${{ secrets.BLAND_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

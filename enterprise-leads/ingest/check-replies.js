@@ -14,6 +14,11 @@
  *   auto-reply   → ignored ("out of office" is not a conversation)
  *   anything else→ status 'replied'      (a human wrote back — go read it)
  *
+ * A NEW human reply also emails an alert to settings.outreach.alert_email
+ * (default: reply_to_email) with their message, their phone number, a link
+ * to the thread and a suggested answer, so Deven can answer within the hour
+ * (the workflow runs hourly).
+ *
  * `reply_kind` records which one it was. Leads already marked 'replied'
  * by the old logic with no reply_kind get re-checked once automatically,
  * so the old misclassifications fix themselves.
@@ -22,7 +27,8 @@
  * GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN. No-ops safely if missing.
  */
 const { createClient } = require('@supabase/supabase-js');
-const { getOwnEmailAddress, getThreadMessages } = require('./lib/gmail');
+const { getOwnEmailAddress, getThreadMessages, sendGmail } = require('./lib/gmail');
+const { loadSetting } = require('./lib/settings');
 const { createRunLog } = require('./lib/run-log');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -103,6 +109,40 @@ async function noteInNotion(lead, text) {
   }
 }
 
+// A starting point for the answer, picked by what they asked. No prices by
+// email: the goal is a call.
+function suggestedReply(lead, snippet) {
+  const first = (lead.reply_from || '').replace(/<.*>/, '').trim().split(/\s+/)[0] || '';
+  const hi = /^[A-Z][a-z]+$/.test(first) ? `Hi ${first},` : 'Hi,';
+  if (/how much|price|pricing|cost|charge|rate|quote|budget/i.test(snippet)) {
+    return `${hi}\n\nThanks for getting back to me! It depends on what you need, and we keep it affordable for small businesses. Could we do a quick 10-minute call so I can give you an exact number? What time works today or tomorrow?\n\nDeven`;
+  }
+  if (/call|phone|talk|speak|reach me|number/i.test(snippet)) {
+    return `${hi}\n\nGreat, thanks! I'll give you a call. Is there a time today or tomorrow that's best?\n\nDeven`;
+  }
+  return `${hi}\n\nThanks for writing back! Happy to answer anything. Would a quick 10-minute call be easiest? Let me know a time that works and the best number to reach you.\n\nDeven`;
+}
+
+async function sendReplyAlert(lead, found, config) {
+  const to = config.alert_email || config.reply_to_email;
+  if (!to) return;
+  const text = [
+    `${lead.business_name} replied. Answering within the hour wins most deals.`,
+    '',
+    `From: ${found.from}`,
+    `Subject: ${found.subject}`,
+    `They said: "${found.snippet}"`,
+    '',
+    lead.phone ? `Call them: ${lead.phone}` : 'No phone number on file.',
+    `Open the conversation: https://mail.google.com/mail/u/0/#all/${lead.gmail_thread_id}`,
+    '',
+    'Suggested answer (edit, then reply in that conversation):',
+    '----',
+    suggestedReply({ ...lead, reply_from: found.from }, `${found.subject} ${found.snippet}`),
+  ].join('\n');
+  await sendGmail({ to, subject: `Reply from ${lead.business_name}: answer now`, text });
+}
+
 const OUTCOME = {
   reply: { status: 'replied', note: '✅ REPLIED — sequence paused. Read it in Gmail.' },
   unsubscribe: { status: 'unsubscribed', note: '⛔ Asked not to be contacted — never email again.' },
@@ -144,6 +184,7 @@ async function run() {
   }
 
   const ownEmail = await getOwnEmailAddress();
+  const config = await loadSetting(supabase, 'outreach').catch(() => ({}));
   const tally = { reply: 0, unsubscribe: 0, bounce: 0, auto: 0, restored: 0, not_sent: 0 };
 
   for (const lead of leads) {
@@ -203,6 +244,9 @@ async function run() {
       if (upErr) throw new Error(upErr.message);
 
       await noteInNotion(lead, `${outcome.note} (${new Date().toISOString().slice(0, 10)})`);
+      if (kind === 'reply' && lead.reply_kind !== 'reply') {
+        await sendReplyAlert(lead, found, config).catch((err) => console.error(`check-replies: alert failed for ${lead.business_name}: ${err.message}`));
+      }
       tally[kind]++;
       console.log(`check-replies: ${lead.business_name} → ${kind}`);
     } catch (err) {
