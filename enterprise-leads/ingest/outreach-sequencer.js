@@ -31,6 +31,10 @@
  *     `preview_base_url` is set — that email links to a free mockup of
  *     a site for their business (see preview.html on the Wade Capital
  *     site). Otherwise they get the regular `website` touch.
+ *   - a category with its own touch set (e.g. `touch_sets.restaurant`,
+ *     the pizza-shop starter menu) gets that email and its
+ *     `followup_sets.<category>` follow-ups, even if the category is in
+ *     skip_categories (that list only skips the generic pitch).
  *   - touches 2+ are shared follow-ups (settings.outreach.followups),
  *     unless settings.outreach.followup_sets has a list for that
  *     need_type (e.g. `buyer_intro` for real estate investors), and
@@ -124,8 +128,14 @@ function previewUrl(lead) {
   return buildPreviewUrl({ ...lead, site_url: null }, config.preview_base_url);
 }
 
+// Categories with their own email (settings.outreach.touch_sets.<category>).
+function categoryTouches(lead) {
+  return lead.category && config.touch_sets[lead.category];
+}
+
 function followupsFor(lead) {
-  return (config.followup_sets && config.followup_sets[lead.need_type]) || config.followups;
+  const sets = config.followup_sets || {};
+  return (categoryTouches(lead) && sets[lead.category]) || sets[lead.need_type] || config.followups;
 }
 
 // Total touches for THIS lead (need types can have their own follow-ups).
@@ -145,6 +155,7 @@ function touchForStep(lead, step) {
     if (lead.email_enrichment_result === 'from_call' && config.touch_sets.after_call) {
       return config.touch_sets.after_call[0];
     }
+    if (categoryTouches(lead)) return categoryTouches(lead)[0];
     if (!lead.site_url && config.preview_base_url && config.touch_sets.no_website && !NO_MOCKUP_NEED_TYPES.includes(lead.need_type)) {
       return config.touch_sets.no_website[0];
     }
@@ -152,7 +163,7 @@ function touchForStep(lead, step) {
     return set[0];
   }
   const pivot = config.automation_pivot;
-  if (pivot && pivot.eligible_need_types.includes(lead.need_type) && step >= pivot.start_step) {
+  if (pivot && !categoryTouches(lead) && pivot.eligible_need_types.includes(lead.need_type) && step >= pivot.start_step) {
     const pivotTouch = pivot.touches[step - pivot.start_step];
     if (pivotTouch) return pivotTouch;
   }
@@ -228,7 +239,8 @@ async function syncSentToNotion(lead, step, subject, bodyText) {
   };
   if (step === 1 && bodyText) {
     props['Drafted Message'] = { rich_text: [{ text: { content: `Subject: ${subject}\n\n${bodyText}`.slice(0, 1990) } }] };
-    props.Offer = { rich_text: [{ text: { content: OFFER_LABELS[lead.need_type] || OFFER_LABELS.website } }] };
+    const offer = categoryTouches(lead) ? `Starter menu (${lead.category})` : OFFER_LABELS[lead.need_type] || OFFER_LABELS.website;
+    props.Offer = { rich_text: [{ text: { content: offer } }] };
   }
   await notionPatch(lead.notion_page_id, props);
   await notionComment(lead.notion_page_id, `[Automation] Touch ${step} sent ${new Date().toLocaleDateString('en-US')}.`);
@@ -251,6 +263,9 @@ function buildMessage(lead, nextStep) {
     // For follow-ups: repeats the mockup link where there is one, else nothing.
     mockup_line: previewUrl(lead) ? `\n\nHere's the sample site I made for ${lead.business_name} again: ${previewUrl(lead)}` : '',
     site_url: lead.site_url || '',
+    // First emails: one line offering the sample site, only when there is one.
+    sample_line: previewUrl(lead) ? `\n\nI also put together a free sample site for ${lead.business_name}: ${previewUrl(lead)}` : '',
+    demo_call_line: config.demo_call_url ? `\n\nHere's a 1-minute recording of our AI phone agent taking a pizza order: ${config.demo_call_url}` : '',
   };
   // Follow-ups reuse the FIRST email's subject ("Re: ...") so Gmail keeps
   // the whole sequence in one thread on the recipient's side.
@@ -419,7 +434,7 @@ async function run() {
   // Best leads first: no site or a broken one, an address at their own domain.
   const score = (l) => (!l.site_url ? 3 : 0) + (!l.mobile_ok ? 2 : 0) + (!l.has_ssl ? 1 : 0) + (l.need_type === 'both' ? 1 : 0) +
     (l.site_url && l.email && l.site_url.includes(l.email.split('@')[1]) ? 2 : 0);
-  const fresh = firstTouchLeads.filter((l) => !skip.has(l.category) && l.email_enrichment_result !== 'agency_managed')
+  const fresh = firstTouchLeads.filter((l) => (!skip.has(l.category) || categoryTouches(l)) && l.email_enrichment_result !== 'agency_managed')
     .sort((a, b) => score(b) - score(a));
   const queue = [...followupLeads, ...fresh];
 

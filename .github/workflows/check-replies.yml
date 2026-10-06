@@ -1,8 +1,12 @@
 name: Check For Lead Replies
 
+concurrency: check-replies
+
 on:
   schedule:
-    - cron: '17 13 * * 1-5' # ~9:17am ET, Mon-Fri (staggered off :45 to avoid GH Actions cron congestion)
+    # Hourly, ~8am-7pm ET every day, so replies get answered fast (a new
+    # reply emails Deven an alert). Staggered off :00 for cron congestion.
+    - cron: '17 12-23 * * *'
   workflow_dispatch: {}
 
 jobs:
