@@ -431,8 +431,8 @@ async function run() {
 
   // Categories we no longer target (settings.outreach.skip_categories) don't get first emails.
   const skip = new Set(config.skip_categories || []);
-  // Best leads first: no site or a broken one, an address at their own domain.
-  const score = (l) => (!l.site_url ? 3 : 0) + (!l.mobile_ok ? 2 : 0) + (!l.has_ssl ? 1 : 0) + (l.need_type === 'both' ? 1 : 0) +
+  // Best leads first: law firms (bigger engagements), then no site or a broken one, an address at their own domain.
+  const score = (l) => (l.need_type === 'governance_audit' ? 10 : 0) + (!l.site_url ? 3 : 0) + (!l.mobile_ok ? 2 : 0) + (!l.has_ssl ? 1 : 0) + (l.need_type === 'both' ? 1 : 0) +
     (l.site_url && l.email && l.site_url.includes(l.email.split('@')[1]) ? 2 : 0);
   const fresh = firstTouchLeads.filter((l) => (!skip.has(l.category) || categoryTouches(l)) && l.email_enrichment_result !== 'agency_managed')
     .sort((a, b) => score(b) - score(a));
