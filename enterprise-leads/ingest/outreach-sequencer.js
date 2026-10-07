@@ -48,7 +48,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { loadSetting } = require('./lib/settings');
 const { sendGmail, deleteDraft, draftStillPending, recentSendLimitHit } = require('./lib/gmail');
-const { fetchSignals } = require('./lib/site-signals');
+const { fetchSignals, pageSpeed } = require('./lib/site-signals');
 const { checkSendable } = require('./lib/email-quality');
 const { previewUrl: buildPreviewUrl } = require('./lib/preview');
 const { createRunLog } = require('./lib/run-log');
@@ -109,9 +109,13 @@ function issueLine(lead) {
     const extra = !lead.mobile_ok ? " and doesn't adjust for phone screens" : !lead.has_ssl ? ' and shows a "not secure" warning in some browsers' : '';
     return `still shows © ${lead.copyright_year} in the footer${extra}`;
   }
+  // Google's own speed test: Largest Contentful Paint over 4 s counts as "poor".
+  if (lead.load_seconds >= 4) return `takes about ${Math.round(lead.load_seconds)} seconds to load on a phone (I ran Google's free speed test)`;
   if (!lead.mobile_ok && !lead.has_ssl) return "doesn't adjust for phones and shows a \"not secure\" warning in some browsers";
   if (!lead.mobile_ok) return "doesn't adjust for phone screens";
   if (!lead.has_ssl) return "shows a \"not secure\" warning in some browsers (no SSL certificate)";
+  if (lead.has_tel === false) return "doesn't have a tap-to-call button, so people on phones have to copy your number by hand";
+  if (lead.has_description === false) return "is missing the short description Google shows under your name in search results";
   if (lead.need_type === 'both') return "doesn't link to any social media accounts";
   return 'could use a refresh';
 }
@@ -365,6 +369,12 @@ async function sendTouch(lead) {
     }
     lead.owner_first = sig.ownerFirst;
     lead.copyright_year = sig.copyrightYear;
+    lead.has_tel = sig.hasTel;
+    lead.has_description = sig.hasDescription;
+    // The speed test is slow, so only run it when nothing cheaper turned up.
+    if (issueLine(lead) === 'could use a refresh' || issueLine(lead).startsWith("doesn't have a tap") || issueLine(lead).startsWith('is missing')) {
+      lead.load_seconds = await pageSpeed(lead.site_url);
+    }
     if (!DRY_RUN) await updateLead(lead.id, { has_ssl: sig.secure, mobile_ok: sig.mobileOk });
     // Only email when there's something real and specific to point to.
     if (!categoryTouches(lead) && ['website', 'both'].includes(lead.need_type) && issueLine(lead) === 'could use a refresh') {

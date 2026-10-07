@@ -48,11 +48,32 @@ function builtBy(text) {
 }
 
 function signalsFromHtml(html, nowYear = new Date().getFullYear()) {
-  const text = visibleText(html || '');
-  return { ownerFirst: ownerFirstName(text), copyrightYear: copyrightYear(text, nowYear), builtBy: builtBy(text) };
+  html = html || '';
+  const text = visibleText(html);
+  return {
+    ownerFirst: ownerFirstName(text), copyrightYear: copyrightYear(text, nowYear), builtBy: builtBy(text),
+    hasTel: /href=["']tel:/i.test(html), // a tap-to-call link
+    hasDescription: /<meta[^>]+name=["']description["'][^>]+content=["'][^"']{20,}/i.test(html)
+      || /<meta[^>]+content=["'][^"']{20,}["'][^>]+name=["']description["']/i.test(html),
+  };
 }
 
-const NONE = { ownerFirst: null, copyrightYear: null, builtBy: null, reachable: false, secure: null, mobileOk: null };
+// Google's free PageSpeed test (mobile): seconds until the main content shows
+// (Largest Contentful Paint). null when the test can't run. Slow (~15 s), so
+// callers only use it when nothing cheaper was found. PSI_API_KEY is optional.
+async function pageSpeed(url, timeoutMs = 60000) {
+  const key = process.env.PSI_API_KEY ? `&key=${process.env.PSI_API_KEY}` : '';
+  try {
+    const res = await fetch(`https://www.googleapis.com/pagespeedonline/v5/runPagespeed?strategy=mobile&category=performance&url=${encodeURIComponent(url)}${key}`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const ms = (await res.json()).lighthouseResult?.audits?.['largest-contentful-paint']?.numericValue;
+    return typeof ms === 'number' ? ms / 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+const NONE = { ownerFirst: null, copyrightYear: null, builtBy: null, hasTel: null, hasDescription: null, reachable: false, secure: null, mobileOk: null };
 
 async function load(url, timeoutMs) {
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WadeCapitalBot/1.0)' } });
@@ -76,13 +97,16 @@ async function fetchSignals(url, timeoutMs = 8000) {
   };
 }
 
-module.exports = { signalsFromHtml, fetchSignals };
+module.exports = { signalsFromHtml, fetchSignals, pageSpeed };
 
 // Self-check: node ingest/lib/site-signals.js
 if (require.main === module) {
   const assert = require('node:assert');
   const s = signalsFromHtml('<p>Meet Maria Lopez, the owner.</p><footer>&copy; 2016 Joe\'s Plumbing. Website by Acme Web Studio</footer>', 2026);
-  assert.deepStrictEqual(s, { ownerFirst: 'Maria', copyrightYear: 2016, builtBy: 'Acme Web Studio' });
+  assert.deepStrictEqual(s, { ownerFirst: 'Maria', copyrightYear: 2016, builtBy: 'Acme Web Studio', hasTel: false, hasDescription: false });
+  const t = signalsFromHtml('<meta name="description" content="Family plumbing in Arlington since 1990"><a href="tel:+17035551234">Call</a>');
+  assert.strictEqual(t.hasTel, true);
+  assert.strictEqual(t.hasDescription, true);
   assert.strictEqual(signalsFromHtml('<p>Our Team Owner</p> Powered by WordPress © 2025', 2026).builtBy, null);
   assert.strictEqual(signalsFromHtml('<p>Contact Us Owner</p>', 2026).ownerFirst, null);
   assert.strictEqual(signalsFromHtml('Dr. Sam Patel, DDS © 2019-2024', 2026).ownerFirst, 'Sam');
