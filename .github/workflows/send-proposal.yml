@@ -1,0 +1,59 @@
+name: Send Proposal
+
+# Run by hand when a business says yes: Actions → Send Proposal → Run workflow.
+# Replies in their email conversation with their proposal page and the
+# onboarding form. See enterprise-leads/ingest/send-proposal.js.
+on:
+  workflow_dispatch:
+    inputs:
+      to_email:
+        description: "The client's email address"
+        required: true
+      service:
+        description: 'What they are buying'
+        required: true
+        type: choice
+        options: [website, starter-menu, ai-receptionist, google-listing, social, governance-audit, automation-audit]
+      price:
+        description: 'Price, in plain words (e.g. "$400 one-time setup, then $40/month")'
+        required: true
+      pay_link:
+        description: 'Stripe payment link (optional; without it they reply "yes" and you invoice)'
+        required: false
+      timeline:
+        description: 'Timeline (optional; default "ready to review within 1–2 weeks of the onboarding form")'
+        required: false
+      note:
+        description: 'One extra line for them (optional)'
+        required: false
+      business:
+        description: 'Business name (only if they are not already a lead)'
+        required: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: "enterprise-leads"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: node ingest/send-proposal.js
+        env:
+          TO_EMAIL: ${{ inputs.to_email }}
+          SERVICE: ${{ inputs.service }}
+          PRICE: ${{ inputs.price }}
+          PAY_LINK: ${{ inputs.pay_link }}
+          TIMELINE: ${{ inputs.timeline }}
+          NOTE: ${{ inputs.note }}
+          BUSINESS: ${{ inputs.business }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
