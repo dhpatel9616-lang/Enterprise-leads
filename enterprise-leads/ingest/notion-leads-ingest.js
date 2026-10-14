@@ -84,7 +84,7 @@ const CATEGORY_SUGGESTED_TAG = {
   legal: 'Legal AI Client',
 };
 
-async function searchPlaces(query, locationBias) {
+async function searchPlaces(query, locationBias, attempt = 1) {
   const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
     method: 'POST',
     headers: {
@@ -104,6 +104,11 @@ async function searchPlaces(query, locationBias) {
       pageSize: 20,
     }),
   });
+  // Google's brief outages (503) and rate limits (429) killed whole runs (Oct 13); wait and retry twice.
+  if ((res.status >= 500 || res.status === 429) && attempt < 3) {
+    await new Promise((r) => setTimeout(r, attempt * 10000));
+    return searchPlaces(query, locationBias, attempt + 1);
+  }
   const data = await res.json();
   if (!res.ok) throw new Error(`Places search failed: ${JSON.stringify(data).slice(0, 300)}`);
   // Skip businesses Google marks as closed.
