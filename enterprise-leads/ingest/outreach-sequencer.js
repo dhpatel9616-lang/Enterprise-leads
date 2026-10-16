@@ -269,6 +269,10 @@ function buildMessage(lead, nextStep) {
     site_url: lead.site_url || '',
     // First emails: one line offering the sample site, only when there is one.
     sample_line: previewUrl(lead) ? `\n\nI also put together a free sample site for ${lead.business_name}: ${previewUrl(lead)}` : '',
+    // The ask that closes every email (outreach v6): a booking link when one is set.
+    booking_line: config.booking_url
+      ? `Can I show you how it would work for ${lead.business_name}? Pick any 15-minute slot here: ${config.booking_url} (or just reply with a time).`
+      : `Can I show you how it would work for ${lead.business_name}? Reply with a 15-minute window this week and I'll send a calendar invite.`,
     demo_call_line: config.demo_call_url ? `\n\nHere's a 1-minute recording of our AI phone agent taking a pizza order: ${config.demo_call_url}` : '',
   };
   // Follow-ups reuse the FIRST email's subject ("Re: ...") so Gmail keeps
