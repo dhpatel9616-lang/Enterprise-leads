@@ -345,7 +345,8 @@ async function resolveLegacyDraft(lead) {
 
 async function sendTouch(lead) {
   const nextStep = lead.sequence_step + 1;
-  const check = await checkSendable(lead.email);
+  // The off-site inbox check only gates first emails: an address already written to without a bounce works.
+  const check = await checkSendable(lead.email, lead.sequence_step === 0 ? lead.site_url : null);
   if (!check.ok) {
     await rejectEmail(lead, lead.email, check.reason);
     return false;
