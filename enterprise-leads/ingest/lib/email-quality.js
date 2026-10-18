@@ -93,13 +93,36 @@ async function domainAcceptsMail(domain) {
 }
 
 // The full pre-send check. Returns { ok, email, reason }.
-async function checkSendable(raw) {
+// A generic inbox (info@, admin@...) at a domain other than the business's own
+// site is usually a stale or unrelated address: 7 of 21 such sends bounced
+// (33%, vs about 6% for everything else; Oct 2026 data).
+const ROLE_INBOX = /^(info|admin|contact|office|hello|sales|support|manager|mail|team|service)@/;
+function offsiteRoleInbox(email, siteUrl) {
+  if (!siteUrl || !ROLE_INBOX.test(email)) return false;
+  let host;
+  try { host = new URL(siteUrl).hostname.replace(/^www\./, ''); } catch { return false; }
+  const domain = email.split('@')[1];
+  return !(domain === host || host.endsWith(`.${domain}`) || domain.endsWith(`.${host}`));
+}
+
+async function checkSendable(raw, siteUrl) {
   const email = normalizeEmail(raw);
   if (!email || !EMAIL_SHAPE.test(email)) return { ok: false, email, reason: 'bad_format' };
   if (isJunkEmail(email)) return { ok: false, email, reason: 'placeholder' };
+  if (offsiteRoleInbox(email, siteUrl)) return { ok: false, email, reason: 'offsite_role_inbox' };
   const domain = email.split('@')[1];
   if (!(await domainAcceptsMail(domain))) return { ok: false, email, reason: 'no_mail_server' };
   return { ok: true, email, reason: null };
 }
 
-module.exports = { normalizeEmail, isJunkEmail, looksValid, checkSendable, domainAcceptsMail };
+module.exports = { normalizeEmail, isJunkEmail, looksValid, checkSendable, domainAcceptsMail, offsiteRoleInbox };
+
+if (require.main === module) {
+  const assert = require('node:assert');
+  assert.equal(offsiteRoleInbox('info@other.com', 'https://www.rivera.com/'), true);
+  assert.equal(offsiteRoleInbox('info@rivera.com', 'https://www.rivera.com/'), false);
+  assert.equal(offsiteRoleInbox('info@rivera.com', 'https://shop.rivera.com/'), false);
+  assert.equal(offsiteRoleInbox('maria@gmail.com', 'https://rivera.com/'), false);
+  assert.equal(offsiteRoleInbox('info@other.com', null), false);
+  console.log('email-quality self-check passed');
+}
