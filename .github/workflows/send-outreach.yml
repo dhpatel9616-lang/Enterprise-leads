@@ -22,6 +22,16 @@ jobs:
         with:
           node-version: 22
       - run: npm install
+      # Podcast guests marked Ready in Notion join the queue first (ingest/podcast-guests.js).
+      # A Notion hiccup here must never stop the business emails below.
+      - run: npm run podcast-guests
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PODCAST_GUESTS_DB: 11c77d7cb8ca4a37a6eebf7cd7e0d0ef
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
       - run: npm run outreach
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
