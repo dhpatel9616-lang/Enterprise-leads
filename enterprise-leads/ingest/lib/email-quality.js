@@ -37,6 +37,10 @@ const JUNK_PATTERNS = [
   /@([a-z0-9-]+\.)?(keen\.io|segment\.(com|io)|mixpanel\.com|intercom\.io|hotjar\.com|cloudflare\.com|jquery\.com|github\.com|googlegroups\.com|squarespace\.com|wix\.com|shopify\.com|mailchimp\.com|sentry-cdn\.com)$/i,
   // our own address (the scraper's User-Agent contains it)
   /^wadecapitallc@gmail\.com$/i,
+  // Credits scraped from a site's code, not the business (Oct 2026 bounces):
+  // font designers' addresses in Google Fonts CSS, and form placeholders.
+  /^(impallari|hello@indestructibletype|sorkintype|info@typetogether)/i,
+  /^address@/i,
 ];
 
 const EMAIL_SHAPE = /^[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i;
