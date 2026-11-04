@@ -106,6 +106,12 @@ const OFFER_LABELS = {
 // 25 hand-picked notes to dental/medical offices instead of mass email).
 const problemRequired = (lead) => (config.problem_required_categories || []).includes(lead.category);
 
+function siteLine(lead) {
+  if (!lead.site_url || lead.built_by) return '';
+  const issue = issueLine(lead);
+  return /social media|could use a refresh/.test(issue) ? '' : `\n\nOne more thing: I noticed your website ${issue}. We fix that too, if it's useful.`;
+}
+
 function issueLine(lead) {
   if (lead.need_type === 'social' && !problemRequired(lead)) return "doesn't link to any social media accounts";
   if (!lead.site_url) return "doesn't seem to have a website";
@@ -273,6 +279,8 @@ function buildMessage(lead, nextStep) {
     mockup_line: previewUrl(lead) ? `\n\nHere's the sample site I made for ${lead.business_name} again: ${previewUrl(lead)}` : '',
     site_url: lead.site_url || '',
     // First emails: one line offering the sample site, only when there is one.
+    // One sentence about a real, checked website problem, or nothing (law-firm notes lead with AI governance).
+    site_line: siteLine(lead),
     sample_line: previewUrl(lead) ? `\n\nI also put together a free sample site for ${lead.business_name}: ${previewUrl(lead)}` : '',
     // The ask that closes every email (outreach v6): a booking link when one is set.
     booking_line: config.booking_url
@@ -377,7 +385,9 @@ async function sendTouch(lead) {
     }
     lead.has_ssl = sig.secure;
     lead.mobile_ok = sig.mobileOk;
-    if (sig.builtBy && lead.need_type !== 'social') {
+    // Law firms get the AI-governance note either way; an agency-run site just isn't mentioned.
+    lead.built_by = sig.builtBy;
+    if (sig.builtBy && lead.need_type !== 'social' && lead.category !== 'legal') {
       console.log(`  - ${lead.business_name}: site built by ${sig.builtBy}; skipping.`);
       if (!DRY_RUN) await updateLead(lead.id, { email_enrichment_result: 'agency_managed' });
       return false;
