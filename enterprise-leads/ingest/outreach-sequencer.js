@@ -107,8 +107,13 @@ const OFFER_LABELS = {
   podcast_guest: 'Podcast guest invite',
 };
 
+// Categories that only get a first email when their WEBSITE has a real, checked
+// problem (settings.outreach.problem_required_categories; owner, 2026-11-04:
+// 25 hand-picked notes to dental/medical offices instead of mass email).
+const problemRequired = (lead) => (config.problem_required_categories || []).includes(lead.category);
+
 function issueLine(lead) {
-  if (lead.need_type === 'social') return "doesn't link to any social media accounts";
+  if (lead.need_type === 'social' && !problemRequired(lead)) return "doesn't link to any social media accounts";
   if (!lead.site_url) return "doesn't seem to have a website";
   // A footer copyright 3+ years old is the most specific thing we can point to.
   if (lead.copyright_year && lead.copyright_year <= new Date().getFullYear() - 3) {
@@ -122,7 +127,7 @@ function issueLine(lead) {
   if (!lead.has_ssl) return "shows a \"not secure\" warning in some browsers (no SSL certificate)";
   if (lead.has_tel === false) return "doesn't have a tap-to-call button, so people on phones have to copy your number by hand";
   if (lead.has_description === false) return "is missing the short description Google shows under your name in search results";
-  if (lead.need_type === 'both') return "doesn't link to any social media accounts";
+  if (lead.need_type === 'both' && !problemRequired(lead)) return "doesn't link to any social media accounts";
   return 'could use a refresh';
 }
 
@@ -367,6 +372,11 @@ async function sendTouch(lead) {
   // Agency-built sites already pay someone for their website: skip them for good.
   // The issue we name must be true: https and the phone layout are checked
   // live here (the stored flags came from the listing link and were often wrong).
+  if (nextStep === 1 && !lead.site_url && problemRequired(lead)) {
+    console.log(`  - ${lead.business_name}: no website to point to; skipping (problem-required category).`);
+    if (!DRY_RUN) await updateLead(lead.id, { email_enrichment_result: 'no_clear_issue' });
+    return false;
+  }
   if (nextStep === 1 && lead.site_url) {
     const sig = await fetchSignals(lead.site_url);
     if (!sig.reachable) {
@@ -391,7 +401,7 @@ async function sendTouch(lead) {
     }
     if (!DRY_RUN) await updateLead(lead.id, { has_ssl: sig.secure, mobile_ok: sig.mobileOk });
     // Only email when there's something real and specific to point to.
-    if (!categoryTouches(lead) && ['website', 'both'].includes(lead.need_type) && issueLine(lead) === 'could use a refresh') {
+    if ((problemRequired(lead) || (!categoryTouches(lead) && ['website', 'both'].includes(lead.need_type))) && issueLine(lead) === 'could use a refresh') {
       console.log(`  - ${lead.business_name}: site checks out fine; no clear issue, skipping.`);
       if (!DRY_RUN) await updateLead(lead.id, { email_enrichment_result: 'no_clear_issue' });
       return false;
@@ -478,7 +488,11 @@ async function run() {
   const score = (l) => (l.need_type === 'podcast_guest' ? 20 : 0) + (l.need_type === 'governance_audit' ? 10 : 0) + (!l.site_url ? 3 : 0) + (!l.mobile_ok ? 2 : 0) + (!l.has_ssl ? 1 : 0) + (l.need_type === 'both' ? 1 : 0) +
     (l.site_url && l.email && l.site_url.includes(l.email.split('@')[1]) ? 2 : 0);
   const done = ['agency_managed', 'no_clear_issue', 'site_unreachable'];
-  const fresh = firstTouchLeads.filter((l) => (!skip.has(l.category) || categoryTouches(l)) && !done.includes(l.email_enrichment_result) && touchForStep(l, 1))
+  // When set, ONLY these categories get first emails (podcast guests aside);
+  // follow-ups to people already emailed still go out. Owner, 2026-11-04: stop mass email.
+  const allow = config.first_email_categories;
+  const allowed = (l) => !allow || allow.includes(l.category) || l.need_type === 'podcast_guest';
+  const fresh = firstTouchLeads.filter((l) => allowed(l) && (!skip.has(l.category) || categoryTouches(l)) && !done.includes(l.email_enrichment_result) && touchForStep(l, 1))
     .sort((a, b) => score(b) - score(a));
   const queue = [...followupLeads, ...fresh];
   const runStart = Math.floor(Date.now() / 1000);
