@@ -81,6 +81,8 @@ const OFFER_PHRASES = {
   research_contact: 'GlobalAggregate as a research tool',
   governance_audit: 'the AI Governance Readiness Audit',
   buyer_intro: 'off-market Baltimore deals',
+  podcast_guest: 'a guest spot on The Sovereign podcast',
+  educator: 'The Global Aggregate for your class',
 };
 
 // Wade Capital service pitches to businesses: the only emails that carry
@@ -88,7 +90,11 @@ const OFFER_PHRASES = {
 const BUSINESS_NEED_TYPES = ['website', 'social', 'both', 'governance_audit', 'buyer_intro'];
 
 // Pitches that are never swapped for the no-website mockup email.
-const NO_MOCKUP_NEED_TYPES = ['governance_audit', 'buyer_intro', 'reciprocal_link', 'research_contact'];
+const NO_MOCKUP_NEED_TYPES = ['governance_audit', 'buyer_intro', 'reciprocal_link', 'research_contact', 'podcast_guest', 'educator'];
+
+// Podcast guests (ingest/podcast-guests.js) only ever get their own invite and
+// follow-ups, never a business pitch: no touch set, no email.
+const OWN_COPY_ONLY = ['podcast_guest', 'educator'];
 
 // Short label for Notion's "Offer" field.
 const OFFER_LABELS = {
@@ -99,6 +105,8 @@ const OFFER_LABELS = {
   research_contact: 'GlobalAggregate research tool',
   governance_audit: 'Legal AI: AI Governance Readiness Audit',
   buyer_intro: 'Real estate: cash-buyer intro',
+  podcast_guest: 'Podcast guest invite',
+  educator: 'GlobalAggregate: classroom use',
 };
 
 // Categories that only get a first email when their WEBSITE has a real, checked
@@ -144,6 +152,7 @@ function categoryTouches(lead) {
 
 function followupsFor(lead) {
   const sets = config.followup_sets || {};
+  if (OWN_COPY_ONLY.includes(lead.need_type)) return sets[lead.need_type] || [];
   return (categoryTouches(lead) && sets[lead.category]) || sets[lead.need_type] || config.followups;
 }
 
@@ -164,6 +173,7 @@ function touchForStep(lead, step) {
     if (lead.email_enrichment_result === 'from_call' && config.touch_sets.after_call) {
       return config.touch_sets.after_call[0];
     }
+    if (OWN_COPY_ONLY.includes(lead.need_type)) return config.touch_sets[lead.need_type]?.[0] || null;
     if (categoryTouches(lead)) return categoryTouches(lead)[0];
     if (!lead.site_url && config.preview_base_url && config.touch_sets.no_website && !NO_MOCKUP_NEED_TYPES.includes(lead.need_type)) {
       return config.touch_sets.no_website[0];
@@ -264,6 +274,7 @@ function buildMessage(lead, nextStep) {
   const touch = touchForStep(lead, nextStep);
   const vars = {
     business_name: lead.business_name,
+    first_name: (lead.business_name || '').trim().split(/\s+/)[0],
     sender_name: (config.sender_name || '').trim(),
     issue_line: issueLine(lead),
     offer_phrase: OFFER_PHRASES[lead.need_type] || OFFER_PHRASES.website,
@@ -476,14 +487,14 @@ async function run() {
   // Categories we no longer target (settings.outreach.skip_categories) don't get first emails.
   const skip = new Set(config.skip_categories || []);
   // Best leads first: law firms (bigger engagements), then no site or a broken one, an address at their own domain.
-  const score = (l) => (l.need_type === 'governance_audit' ? 10 : 0) + (!l.site_url ? 3 : 0) + (!l.mobile_ok ? 2 : 0) + (!l.has_ssl ? 1 : 0) + (l.need_type === 'both' ? 1 : 0) +
+  const score = (l) => (OWN_COPY_ONLY.includes(l.need_type) ? 20 : 0) + (l.need_type === 'governance_audit' ? 10 : 0) + (!l.site_url ? 3 : 0) + (!l.mobile_ok ? 2 : 0) + (!l.has_ssl ? 1 : 0) + (l.need_type === 'both' ? 1 : 0) +
     (l.site_url && l.email && l.site_url.includes(l.email.split('@')[1]) ? 2 : 0);
   const done = ['agency_managed', 'no_clear_issue', 'site_unreachable'];
   // When set, ONLY these categories get first emails (podcast guests aside);
   // follow-ups to people already emailed still go out. Owner, 2026-11-04: stop mass email.
   const allow = config.first_email_categories;
-  const allowed = (l) => !allow || allow.includes(l.category) || l.need_type === 'podcast_guest';
-  const fresh = firstTouchLeads.filter((l) => allowed(l) && (!skip.has(l.category) || categoryTouches(l)) && !done.includes(l.email_enrichment_result))
+  const allowed = (l) => !allow || allow.includes(l.category) || OWN_COPY_ONLY.includes(l.need_type);
+  const fresh = firstTouchLeads.filter((l) => allowed(l) && (!skip.has(l.category) || categoryTouches(l)) && !done.includes(l.email_enrichment_result) && touchForStep(l, 1))
     .sort((a, b) => score(b) - score(a));
   const queue = [...followupLeads, ...fresh];
   const runStart = Math.floor(Date.now() / 1000);
