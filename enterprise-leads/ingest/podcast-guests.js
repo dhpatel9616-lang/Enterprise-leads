@@ -10,14 +10,20 @@
  * becomes "Queued" with its Lead ID. The personal line rides in
  * outreach_context ({context} in the email).
  *
+ * Also runs for Notion → GA Educators (owner, 2026-11-05): CONTACTS_DB=<that
+ * database>, NEED_TYPE=educator, CATEGORY=ga-educator.
+ *
  * Requires NOTION_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY; the database ID
- * comes from PODCAST_GUESTS_DB. No-ops safely if any are missing.
+ * comes from CONTACTS_DB (or PODCAST_GUESTS_DB). No-ops safely if any are missing.
  * DRY_RUN=1 prints what would move.
  */
 const { createClient } = require('@supabase/supabase-js');
 const { looksValid } = require('./lib/email-quality');
 
-const { NOTION_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY, PODCAST_GUESTS_DB } = process.env;
+const { NOTION_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_KEY } = process.env;
+const CONTACTS_DB = process.env.CONTACTS_DB || process.env.PODCAST_GUESTS_DB;
+const NEED_TYPE = process.env.NEED_TYPE || 'podcast_guest';
+const CATEGORY = process.env.CATEGORY || 'podcast-guest';
 const DRY_RUN = process.env.DRY_RUN === '1';
 const NOTION_VERSION = '2022-06-28';
 const text = (p) => (p?.rich_text || p?.title || []).map((t) => t.plain_text).join('').trim();
@@ -30,8 +36,8 @@ function rowToLead(page) {
   return {
     business_name: text(p.Name),
     email,
-    need_type: 'podcast_guest',
-    category: 'podcast-guest',
+    need_type: NEED_TYPE,
+    category: CATEGORY,
     status: 'new',
     sequence_step: 0,
     notion_page_id: page.id,
@@ -51,11 +57,11 @@ async function notion(path, body, method = 'POST') {
 }
 
 async function run() {
-  if (!NOTION_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_KEY || !PODCAST_GUESTS_DB) {
-    return console.log('podcast-guests: a required secret or PODCAST_GUESTS_DB is missing. Skipping run.');
+  if (!NOTION_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_KEY || !CONTACTS_DB) {
+    return console.log('podcast-guests: a required secret or CONTACTS_DB is missing. Skipping run.');
   }
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-  const { results } = await notion(`databases/${PODCAST_GUESTS_DB}/query`, { filter: { property: 'Status', select: { equals: 'Ready' } }, page_size: 100 });
+  const { results } = await notion(`databases/${CONTACTS_DB}/query`, { filter: { property: 'Status', select: { equals: 'Ready' } }, page_size: 100 });
   let moved = 0;
   for (const page of results) {
     const lead = rowToLead(page);
@@ -71,7 +77,7 @@ async function run() {
     }
     await notion(`pages/${page.id}`, { properties: { Status: { select: { name: 'Queued' } }, 'Lead ID': { rich_text: [{ text: { content: String(id) } }] } } }, 'PATCH');
   }
-  console.log(`podcast-guests: ${results.length} Ready, ${moved} queued for outreach.`);
+  console.log(`podcast-guests (${NEED_TYPE}): ${results.length} Ready, ${moved} queued for outreach.`);
 }
 
 module.exports = { rowToLead };

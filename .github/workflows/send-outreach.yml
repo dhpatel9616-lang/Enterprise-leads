@@ -32,6 +32,17 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           PODCAST_GUESTS_DB: 11c77d7cb8ca4a37a6eebf7cd7e0d0ef
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+      # Teachers and professors marked Ready in Notion → GA Educators (same script).
+      - run: npm run podcast-guests
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          CONTACTS_DB: 0bf67959e3454c5986037ef63d6b6dfb
+          NEED_TYPE: educator
+          CATEGORY: ga-educator
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
       - run: npm run outreach
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
