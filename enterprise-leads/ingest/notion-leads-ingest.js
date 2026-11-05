@@ -267,10 +267,16 @@ function shuffle(arr) {
 // builds every (location × category) combination as its own search.
 // Add one new location and every existing category gets searched
 // there automatically, and vice versa.
+// Owner, 2026-11-05: `only_categories` limits searching to the categories we
+// actually email (no Places budget spent on the rest), and a category marked
+// `national: true` is also searched in every `national_locations` metro.
 function buildQueries(config) {
   const combos = [];
-  for (const location of config.locations) {
-    for (const cat of config.categories) {
+  const only = config.only_categories;
+  for (const cat of config.categories) {
+    if (only && !only.includes(cat.category)) continue;
+    const locations = cat.national ? [...config.locations, ...(config.national_locations || [])] : config.locations;
+    for (const location of locations) {
       combos.push({
         q: `${cat.search_term} in ${location.name}`,
         category: cat.category,
